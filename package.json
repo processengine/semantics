@@ -1,0 +1,62 @@
+{
+  "name": "@processengine/semantics",
+  "version": "1.0.0",
+  "description": "Canonical implementation of subject-level process semantics for the ProcessEngine family. Interprets Flow3 DSL and provides transport-safe process state transitions.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./schema": {
+      "default": "./dist/schema/flow.schema.json"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "COMPATIBILITY.md",
+    "CHANGELOG.md",
+    "SPEC.md",
+    "SPEC_RU.md",
+    "docs",
+    "examples"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/processengine/semantics.git"
+  },
+  "homepage": "https://github.com/processengine/semantics#readme",
+  "bugs": {
+    "url": "https://github.com/processengine/semantics/issues"
+  },
+  "license": "MIT",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=20.19.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "keywords": [
+    "processengine",
+    "flow",
+    "dsl",
+    "runtime",
+    "compiler",
+    "validation"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && mkdir -p dist/schema && cp src/schema/flow.schema.json dist/schema/flow.schema.json",
+    "test": "npm run build && vitest run",
+    "bench": "node benchmarks/run.mjs",
+    "check": "npm test"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4"
+  }
+}

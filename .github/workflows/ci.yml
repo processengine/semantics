@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Run unit, README, and docs smoke tests
+        run: npm test
+
+      - name: Verify package contents
+        run: npm pack --json > pack-output.json
+
+      - name: Upload packed artifact
+        if: matrix.node == 22
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-pack-node-${{ matrix.node }}
+          path: |
+            *.tgz
+            pack-output.json
+          if-no-files-found: error

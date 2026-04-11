@@ -1,0 +1,287 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://processengine.dev/schemas/flow3-1.0.0.schema.json",
+  "title": "@processengine/semantics v1.0.0 — Flow3 FlowDefinition",
+  "description": "Canonical JSON Schema for Flow3 DSL artifacts interpreted by the semantics layer.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "entryStepId", "steps"],
+  "properties": {
+    "id":          { "type": "string", "minLength": 1 },
+    "version":     { "type": "string", "minLength": 1 },
+    "entryStepId": { "type": "string", "minLength": 1 },
+    "title":       { "type": "string" },
+    "description": { "type": "string" },
+    "metadata":    { "$ref": "#/$defs/jsonObject" },
+    "steps": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "oneOf": [
+          { "$ref": "#/$defs/executableProcessStep" },
+          { "$ref": "#/$defs/routeStep" },
+          { "$ref": "#/$defs/switchStep" },
+          { "$ref": "#/$defs/commandCallEffectStep" },
+          { "$ref": "#/$defs/subflowEffectStep" },
+          { "$ref": "#/$defs/waitStep" },
+          { "$ref": "#/$defs/terminalStep" }
+        ]
+      }
+    }
+  },
+
+  "$defs": {
+
+    "jsonValue": {
+      "oneOf": [
+        { "type": "string" },
+        { "type": "number" },
+        { "type": "boolean" },
+        { "type": "null" },
+        { "type": "array", "items": { "$ref": "#/$defs/jsonValue" } },
+        { "$ref": "#/$defs/jsonObject" }
+      ]
+    },
+
+    "jsonObject": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/jsonValue" }
+    },
+
+    "path": {
+      "type": "string",
+      "pattern": "^\\$\\.(?:[A-Za-z_][A-Za-z0-9_]*|\\[(?:\\d+|\\\"[^\\\"]+\\\"|'[^']+')\\])(?:\\.(?:[A-Za-z_][A-Za-z0-9_]*)|\\[(?:\\d+|\\\"[^\\\"]+\\\"|'[^']+')\\])*$"
+    },
+
+    "inputRef": {
+      "oneOf": [
+        { "$ref": "#/$defs/path" },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": { "$ref": "#/$defs/inputRef" }
+        }
+      ]
+    },
+
+    "stepContract": {
+      "description": "Canonical binding contract for executable PROCESS steps.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["input", "output"],
+      "properties": {
+        "input": {
+          "type": "object",
+          "required": ["ref"],
+          "additionalProperties": true,
+          "properties": {
+            "ref": { "$ref": "#/$defs/inputRef" },
+            "fields": { "$ref": "#/$defs/jsonObject" }
+          }
+        },
+        "output": {
+          "type": "object",
+          "required": ["ref"],
+          "additionalProperties": true,
+          "properties": {
+            "ref": { "$ref": "#/$defs/path" },
+            "fields": { "$ref": "#/$defs/jsonObject" }
+          }
+        }
+      }
+    },
+
+    "stepBase": {
+      "type": "object",
+      "properties": {
+        "id":          { "type": "string", "minLength": 1 },
+        "title":       { "type": "string" },
+        "description": { "type": "string" },
+        "metadata":    { "$ref": "#/$defs/jsonObject" }
+      }
+    },
+
+    "executableProcessStep": {
+      "description": "Executable PROCESS step — RULES, MAPPINGS, or DECISIONS. Uses contract.input.ref / contract.output.ref for bindings.",
+      "allOf": [
+        { "$ref": "#/$defs/stepBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "type", "subtype", "artefactId", "contract", "nextStepId"],
+          "properties": {
+            "id":         { "type": "string", "minLength": 1 },
+            "type":       { "const": "PROCESS" },
+            "subtype":    { "enum": ["RULES", "MAPPINGS", "DECISIONS"] },
+            "artefactId": { "type": "string", "minLength": 1 },
+            "contract":   { "$ref": "#/$defs/stepContract" },
+            "nextStepId": { "type": "string", "minLength": 1 },
+            "title":       { "type": "string" },
+            "description": { "type": "string" },
+            "metadata":    { "$ref": "#/$defs/jsonObject" }
+          }
+        }
+      ]
+    },
+
+    "routeStep": {
+      "description": "CONTROL/ROUTE step — resolved internally by semantics. Not executed by the orchestrator.",
+      "allOf": [
+        { "$ref": "#/$defs/stepBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "type", "subtype", "factRef", "cases", "defaultNextStepId"],
+          "properties": {
+            "id":              { "type": "string", "minLength": 1 },
+            "type":            { "const": "CONTROL" },
+            "subtype":         { "const": "ROUTE" },
+            "factRef":         { "$ref": "#/$defs/path" },
+            "cases": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": { "type": "string", "minLength": 1 }
+            },
+            "defaultNextStepId": { "type": "string", "minLength": 1 },
+            "title":       { "type": "string" },
+            "description": { "type": "string" },
+            "metadata":    { "$ref": "#/$defs/jsonObject" }
+          }
+        }
+      ]
+    },
+
+    "switchStep": {
+      "description": "CONTROL/SWITCH step — resolved internally by semantics. Not executed by the orchestrator.",
+      "allOf": [
+        { "$ref": "#/$defs/stepBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "type", "subtype", "decisionSetId", "cases", "defaultNextStepId"],
+          "properties": {
+            "id":              { "type": "string", "minLength": 1 },
+            "type":            { "const": "CONTROL" },
+            "subtype":         { "const": "SWITCH" },
+            "decisionSetId":   { "type": "string", "minLength": 1 },
+            "cases": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": { "type": "string", "minLength": 1 }
+            },
+            "defaultNextStepId": { "type": "string", "minLength": 1 },
+            "title":       { "type": "string" },
+            "description": { "type": "string" },
+            "metadata":    { "$ref": "#/$defs/jsonObject" }
+          }
+        }
+      ]
+    },
+
+    "commandCallEffectStep": {
+      "description": "EFFECT/COMMAND or EFFECT/CALL step — dispatched externally by the orchestrator.",
+      "allOf": [
+        { "$ref": "#/$defs/stepBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "type", "subtype", "operationId", "inputRef", "nextStepId"],
+          "properties": {
+            "id":              { "type": "string", "minLength": 1 },
+            "type":            { "const": "EFFECT" },
+            "subtype":         { "enum": ["COMMAND", "CALL"] },
+            "operationId":     { "type": "string", "minLength": 1 },
+            "inputRef":        { "$ref": "#/$defs/inputRef" },
+            "nextStepId":      { "type": "string", "minLength": 1 },
+            "onErrorStepId":   { "type": "string", "minLength": 1 },
+            "onTimeoutStepId": { "type": "string", "minLength": 1 },
+            "title":       { "type": "string" },
+            "description": { "type": "string" },
+            "metadata":    { "$ref": "#/$defs/jsonObject" }
+          }
+        }
+      ]
+    },
+
+    "subflowEffectStep": {
+      "description": "EFFECT/SUBFLOW step — orchestrator launches a child process identified by flowId/flowVersion.",
+      "allOf": [
+        { "$ref": "#/$defs/stepBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "type", "subtype", "operationId", "flowId", "flowVersion", "inputRef", "nextStepId"],
+          "properties": {
+            "id":              { "type": "string", "minLength": 1 },
+            "type":            { "const": "EFFECT" },
+            "subtype":         { "const": "SUBFLOW" },
+            "operationId":     { "type": "string", "minLength": 1 },
+            "flowId":          { "type": "string", "minLength": 1, "description": "Target Flow3 definition identifier" },
+            "flowVersion":     { "type": "string", "minLength": 1, "description": "Target flow version — must be explicit" },
+            "inputRef":        { "$ref": "#/$defs/inputRef" },
+            "nextStepId":      { "type": "string", "minLength": 1 },
+            "onErrorStepId":   { "type": "string", "minLength": 1 },
+            "onTimeoutStepId": { "type": "string", "minLength": 1 },
+            "title":       { "type": "string" },
+            "description": { "type": "string" },
+            "metadata":    { "$ref": "#/$defs/jsonObject" }
+          }
+        }
+      ]
+    },
+
+    "waitStep": {
+      "description": "WAIT/MESSAGE step — process suspends until the orchestrator delivers an external result.",
+      "allOf": [
+        { "$ref": "#/$defs/stepBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "type", "subtype", "sourceStepId", "nextStepId", "onErrorStepId", "onTimeoutStepId"],
+          "properties": {
+            "id":              { "type": "string", "minLength": 1 },
+            "type":            { "const": "WAIT" },
+            "subtype":         { "const": "MESSAGE" },
+            "sourceStepId":    { "type": "string", "minLength": 1 },
+            "nextStepId":      { "type": "string", "minLength": 1 },
+            "onErrorStepId":   { "type": "string", "minLength": 1 },
+            "onTimeoutStepId": { "type": "string", "minLength": 1 },
+            "title":       { "type": "string" },
+            "description": { "type": "string" },
+            "metadata":    { "$ref": "#/$defs/jsonObject" }
+          }
+        }
+      ]
+    },
+
+    "terminalStep": {
+      "description": "TERMINAL step — ends the process with COMPLETE or FAIL status.",
+      "allOf": [
+        { "$ref": "#/$defs/stepBase" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "type", "subtype", "result"],
+          "properties": {
+            "id":      { "type": "string", "minLength": 1 },
+            "type":    { "const": "TERMINAL" },
+            "subtype": { "enum": ["COMPLETE", "FAIL"] },
+            "result": {
+              "type": "object",
+              "required": ["status", "outcome"],
+              "additionalProperties": { "$ref": "#/$defs/jsonValue" },
+              "properties": {
+                "status":  { "enum": ["COMPLETE", "FAIL"] },
+                "outcome": { "type": "string", "minLength": 1 }
+              }
+            },
+            "title":       { "type": "string" },
+            "description": { "type": "string" },
+            "metadata":    { "$ref": "#/$defs/jsonObject" }
+          }
+        }
+      ]
+    }
+
+  }
+}

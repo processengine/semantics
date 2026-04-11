@@ -1,0 +1,31 @@
+{
+  "id": "example.minimal.linear",
+  "version": "2026-04-09",
+  "entryStepId": "map_input",
+  "steps": {
+    "map_input": {
+      "id": "map_input",
+      "type": "PROCESS",
+      "subtype": "MAPPINGS",
+      "artefactId": "process.map",
+      "nextStepId": "finish_complete",
+      "contract": {
+        "input": {
+          "ref": "$.context.input"
+        },
+        "output": {
+          "ref": "$.context.facts.mapped"
+        }
+      }
+    },
+    "finish_complete": {
+      "id": "finish_complete",
+      "type": "TERMINAL",
+      "subtype": "COMPLETE",
+      "result": {
+        "status": "COMPLETE",
+        "outcome": "MAPPED"
+      }
+    }
+  }
+}

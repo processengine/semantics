@@ -1,0 +1,61 @@
+{
+  "id": "example.rule.decision",
+  "version": "2026-04-09",
+  "entryStepId": "decide_review",
+  "steps": {
+    "decide_review": {
+      "id": "decide_review",
+      "type": "PROCESS",
+      "subtype": "DECISIONS",
+      "artefactId": "process.decideReview",
+      "nextStepId": "switch_review",
+      "contract": {
+        "input": {
+          "ref": "$.context.input"
+        },
+        "output": {
+          "ref": "$.context.decisions.review"
+        }
+      }
+    },
+    "switch_review": {
+      "id": "switch_review",
+      "type": "CONTROL",
+      "subtype": "SWITCH",
+      "decisionSetId": "review",
+      "cases": {
+        "CONTINUE": "finish_complete",
+        "REJECT": "finish_fail",
+        "MANUAL": "finish_manual"
+      },
+      "defaultNextStepId": "finish_fail"
+    },
+    "finish_complete": {
+      "id": "finish_complete",
+      "type": "TERMINAL",
+      "subtype": "COMPLETE",
+      "result": {
+        "status": "COMPLETE",
+        "outcome": "CONTINUE"
+      }
+    },
+    "finish_manual": {
+      "id": "finish_manual",
+      "type": "TERMINAL",
+      "subtype": "FAIL",
+      "result": {
+        "status": "FAIL",
+        "outcome": "MANUAL_REVIEW"
+      }
+    },
+    "finish_fail": {
+      "id": "finish_fail",
+      "type": "TERMINAL",
+      "subtype": "FAIL",
+      "result": {
+        "status": "FAIL",
+        "outcome": "REJECT"
+      }
+    }
+  }
+}
