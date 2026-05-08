@@ -74,7 +74,10 @@ export interface TerminalTransitionTarget {
     stepId: StepId;
     type: 'TERMINAL';
     subtype: TerminalResultStatus;
-    result: TerminalResult;
+    /** Present when TERMINAL uses static inline result. */
+    result?: TerminalResult;
+    /** Present when TERMINAL uses dynamic resultRef. Resolved at followTransition time. */
+    resultRef?: string;
 }
 export type TransitionTarget = ProcessTransitionTarget | ControlTransitionTarget | EffectTransitionTarget | WaitTransitionTarget | TerminalTransitionTarget;
 export interface NormalizedExecutableProcessStep {
@@ -120,7 +123,10 @@ export interface NormalizedTerminalStep {
     id: StepId;
     type: 'TERMINAL';
     subtype: TerminalResultStatus;
-    result: TerminalResult;
+    /** Present when using static inline result. */
+    result?: TerminalResult;
+    /** Present when using dynamic resultRef. The ref is resolved at followTransition time. */
+    resultRef?: string;
 }
 export type NormalizedProcessStep = NormalizedExecutableProcessStep;
 export type NormalizedControlStep = NormalizedRouteStep | NormalizedSwitchStep;

@@ -109,6 +109,7 @@ const TERMINAL_ALLOWED_FIELDS = new Set([
   'type',
   'subtype',
   'result',
+  'resultRef',
   'title',
   'description',
   'metadata',
@@ -316,7 +317,29 @@ function validateWaitStep(stepKey: string, rawStep: Record<string, unknown>, ste
 
 function validateTerminalStep(stepKey: string, rawStep: Record<string, unknown>, step: TerminalStepDefinition, errors: ValidationIssue[]): void {
   validateAllowedFields(stepKey, rawStep, TERMINAL_ALLOWED_FIELDS, errors);
-  validateTerminalResult(stepKey, step, errors);
+
+  const hasResult = step.result !== undefined;
+  const hasResultRef = step.resultRef !== undefined;
+
+  if (!hasResult && !hasResultRef) {
+    errors.push(issue('FLOW_TERMINAL_RESULT_INVALID', 'TERMINAL must have either "result" or "resultRef"', stepPath(stepKey)));
+    return;
+  }
+
+  if (hasResult && hasResultRef) {
+    errors.push(issue('FLOW_TERMINAL_RESULT_INVALID', 'TERMINAL cannot have both "result" and "resultRef"', stepPath(stepKey)));
+    return;
+  }
+
+  if (hasResult) {
+    validateTerminalResult(stepKey, step, errors);
+  } else {
+    if (!isNonEmptyString(step.resultRef)) {
+      errors.push(issue('FLOW_TERMINAL_RESULT_INVALID', 'TERMINAL.resultRef must be a non-empty string path', stepPath(stepKey, 'resultRef')));
+    } else if (!isValidPath(step.resultRef)) {
+      errors.push(issue('FLOW_PATH_SYNTAX_INVALID', `TERMINAL.resultRef has invalid path syntax: ${step.resultRef}`, stepPath(stepKey, 'resultRef')));
+    }
+  }
 }
 
 function validateStep(stepKey: string, rawStep: unknown, errors: ValidationIssue[]): StepDefinition | null {
@@ -448,6 +471,15 @@ function validateGraph(flow: FlowDefinition, stepsById: Record<StepId, StepDefin
   if (!stepIds.has(flow.entryStepId)) {
     errors.push(issue('FLOW_ENTRY_STEP_NOT_FOUND', `entryStepId is not present in steps: ${flow.entryStepId}`, rootPath('entryStepId')));
     return;
+  }
+
+  const entryStep = stepsById[flow.entryStepId];
+  if (entryStep?.type === 'TERMINAL' && (entryStep as TerminalStepDefinition).resultRef) {
+    errors.push(issue(
+      'FLOW_TERMINAL_RESULT_INVALID',
+      'entryStepId cannot point to a TERMINAL step with resultRef: context is empty at process creation',
+      rootPath('entryStepId'),
+    ));
   }
 
   const reachable = new Set<StepId>();

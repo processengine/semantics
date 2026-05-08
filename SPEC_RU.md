@@ -1,6 +1,6 @@
 # `@processengine/semantics` — Спецификация
 
-**Версия:** 1.0.0  
+**Версия:** 1.1.0  
 **DSL:** Flow3  
 **Роль:** семантический слой семейства ProcessEngine
 
@@ -47,7 +47,7 @@ Flow3-артефакт
 | `CONTROL`  | `ROUTE` `SWITCH`             | semantics внутренне — до `executeStep` не доходят |
 | `EFFECT`   | `COMMAND` `CALL` `SUBFLOW`   | оркестратор             |
 | `WAIT`     | `MESSAGE` (`WAIT/MESSAGE`)   | оркестратор             |
-| `TERMINAL` | `COMPLETE` `FAIL`            | semantics               |
+| `TERMINAL` | `COMPLETE` `FAIL`            | semantics — резолвит `result` или `resultRef` | semantics               |
 
 ### 3.2. Executable PROCESS — привязка через `contract`
 
@@ -117,6 +117,33 @@ Executable `PROCESS`-шаги (RULES, MAPPINGS, DECISIONS) используют 
 | `context.decisions`| DECISIONS-шаги          |
 | `context.effects`  | `apply(...)` / `resume(...)` |
 | `context.steps`    | трейс (при `traceMode !== 'off'`) |
+
+### 3.5. Шаг TERMINAL
+
+`TERMINAL` завершает процесс. Semantics устанавливает `state.status` и `state.result`.
+
+Шаг TERMINAL должен содержать ровно одно из:
+
+**Статический `result`** — встроенный JSON-объект:
+```json
+{
+  "type": "TERMINAL", "subtype": "FAIL",
+  "result": { "status": "FAIL", "outcome": "VALIDATION_REJECT" }
+}
+```
+
+**Динамический `resultRef`** — путь к значению, вычисленному ранее в state:
+```json
+{
+  "type": "TERMINAL", "subtype": "FAIL",
+  "resultRef": "$.context.facts.validationRejectResult"
+}
+```
+
+При использовании `resultRef` semantics при переходе в TERMINAL-шаг читает значение по указанному пути. Значение должно быть JSON-safe объектом с непустым `outcome` и `status`, совпадающим с `subtype`.
+
+`resultRef` — канонический механизм для динамических финальных payload. Хост-сервис **не должен** изменять `state.result` после того, как semantics его установил.
+
 
 ---
 

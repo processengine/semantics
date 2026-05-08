@@ -1,5 +1,18 @@
 # Compatibility Policy
 
+
+## 1.1.0 — NormalizedTerminalStep shape change
+
+`NormalizedTerminalStep.result` is now `TerminalResult | undefined` (was `TerminalResult`).
+When a TERMINAL step uses `resultRef`, `plan(...)` returns `{ type: "TERMINAL", resultRef: "..." }` without `result`.
+
+**Impact:** consumers that access `step.result` directly on a `NormalizedTerminalStep` without checking `step.type === "TERMINAL"` first may get `undefined` if the step uses `resultRef`. 
+
+**Migration:** check `step.resultRef` before `step.result`, or — since TERMINAL steps are not dispatched to the orchestrator — simply break the loop when `step.type === "TERMINAL"` as shown in the README example.
+
+---
+
+
 ## Current public contract
 
 The current contract is the canonical `flows` model documented in:

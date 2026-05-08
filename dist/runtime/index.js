@@ -145,11 +145,20 @@ function ensureRuntimeAllowed(flow, state) {
 function buildTransitionTarget(flow, stepId) {
     const step = ensurePreparedStep(flow, stepId);
     if (step.type === 'TERMINAL') {
+        const terminalStep = step;
+        if (terminalStep.resultRef) {
+            return {
+                stepId: step.id,
+                type: 'TERMINAL',
+                subtype: step.subtype,
+                resultRef: terminalStep.resultRef,
+            };
+        }
         return {
             stepId: step.id,
             type: 'TERMINAL',
             subtype: step.subtype,
-            result: structuredClone(step.result),
+            result: structuredClone(terminalStep.result),
         };
     }
     if (step.type === 'WAIT') {
@@ -244,8 +253,26 @@ function followTransition(state, target, at) {
         return state;
     }
     if (target.type === 'TERMINAL') {
-        state.status = target.result.status;
-        state.result = structuredClone(target.result);
+        let result;
+        if (target.resultRef) {
+            const resolved = getPath(state, target.resultRef);
+            if (!resolved.found || !isRecord(resolved.value) || !isJsonSafe(resolved.value)) {
+                throw new XRuntimeError('FLOW_RESULT_REF_NOT_RESOLVED', `TERMINAL resultRef path is missing or not a JSON-safe object: ${target.resultRef}`, { resultRef: target.resultRef, stepId: target.stepId });
+            }
+            const dynamic = resolved.value;
+            if (!isNonEmptyString(dynamic['outcome'])) {
+                throw new XRuntimeError('FLOW_RESULT_REF_SHAPE_INVALID', `Value at resultRef must have a non-empty string "outcome": ${target.resultRef}`, { resultRef: target.resultRef, stepId: target.stepId });
+            }
+            if (dynamic['status'] !== target.subtype) {
+                throw new XRuntimeError('FLOW_RESULT_REF_SHAPE_INVALID', `Value at resultRef "status" must match TERMINAL subtype "${target.subtype}": ${target.resultRef}`, { resultRef: target.resultRef, stepId: target.stepId, status: dynamic['status'] });
+            }
+            result = structuredClone(dynamic);
+        }
+        else {
+            result = structuredClone(target.result);
+        }
+        state.status = result.status;
+        state.result = result;
         state.currentStepId = target.stepId;
         state.currentStepType = 'TERMINAL';
         state.currentStepSubtype = target.subtype;
@@ -350,8 +377,19 @@ export function createProcessState(params) {
         appendHistory(state, { at: createdAt, kind: 'STEP_WAITING', stepId: entryStep.id });
     }
     if (entryStep.type === 'TERMINAL') {
-        state.status = entryStep.result.status;
-        state.result = structuredClone(entryStep.result);
+        const terminalEntry = entryStep;
+        let entryResult;
+        if (terminalEntry.resultRef) {
+            // resultRef at entry is forbidden by validateFlow.
+            // If somehow reached (e.g. prepareFlow used without validateFlow),
+            // fail clearly rather than silently using empty context.
+            throw new XRuntimeError('FLOW_RESULT_REF_NOT_RESOLVED', 'TERMINAL with resultRef cannot be the entryStepId: dynamic terminal result must be produced by a prior process step', { stepId: entryStep.id, resultRef: terminalEntry.resultRef });
+        }
+        else {
+            entryResult = structuredClone(terminalEntry.result);
+        }
+        state.status = entryResult.status;
+        state.result = entryResult;
         updateStepTrace(state, entryStep.id, {
             status: 'COMPLETED',
             startedAt: createdAt,
@@ -438,11 +476,20 @@ export function plan(flow, state) {
             normalized.operationId = operationId;
         return normalized;
     }
+    const terminalPlan = currentStep;
+    if (terminalPlan.resultRef) {
+        return {
+            id: terminalPlan.id,
+            type: 'TERMINAL',
+            subtype: terminalPlan.subtype,
+            resultRef: terminalPlan.resultRef,
+        };
+    }
     return {
-        id: currentStep.id,
+        id: terminalPlan.id,
         type: 'TERMINAL',
-        subtype: currentStep.subtype,
-        result: structuredClone(currentStep.result),
+        subtype: terminalPlan.subtype,
+        result: structuredClone(terminalPlan.result),
     };
 }
 export function reduce(step, currentState, output) {

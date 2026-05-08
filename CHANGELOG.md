@@ -1,32 +1,51 @@
 # Changelog
 
-## 2.1.0
+All notable changes to `@processengine/semantics` are documented here.
 
-- realigned the library to the final ProcessEngine canon
-- changed Flow DSL root to object-map `steps`
-- made `subtype` mandatory for every step
-- introduced canonical executable `PROCESS` subtypes: `RULES`, `MAPPINGS`, `DECISIONS`
-- changed `WAIT` to explicit `WAIT/MESSAGE`
-- changed active process status from `RUNNING` to `ACTIVE`
-- changed EFFECT dispatch field from `artefactId` to `operationId`
-- removed `correlationKey` from the public runtime contract
-- changed validation result shape to `{ isValid, errors, warnings }`
-- renamed public errors to `XCompileError` and `XRuntimeError`
-- changed runtime contract so missing path resolution and mixed `result + error` are runtime violations
-- removed public `createProcessState(...)` from the package root export
-- rewrote README, SPEC, examples, and docs to the canonical model
+## [Unreleased]
 
-## 2.0.1
+## [1.1.0] — 2026-05-08
 
-- tightened `flows 2.0.0` docs and release checks
-- fixed README and public examples around `plan / reduce / apply / resume`
-- added README smoke tests, package artifact checks, and release docs coverage
+### Added
 
-## 2.0.0
+- **`TERMINAL.resultRef`** — dynamic terminal result resolution by semantics.  
+  A TERMINAL step can now specify `resultRef` (a state path, e.g. `$.context.facts.myResult`)
+  instead of a static inline `result`. When the process transitions into that terminal step,
+  semantics reads the value at the given path, validates its shape, and sets it as `state.result`.
+  This is the canonical solution for dynamic terminal payloads (e.g. validation reject with
+  per-field errors) — semantics owns the final result, no post-processing in the host runtime
+  is required.
 
-- introduced the initial `flows 2.x` public API
-- removed the legacy snapshot/runtime API from the package root
+- **New runtime error codes**: `FLOW_RESULT_REF_NOT_RESOLVED`, `FLOW_RESULT_REF_SHAPE_INVALID`.
 
-## 1.0.0
+- **Compile-time validation** for `resultRef`:
+  - exactly one of `result` or `resultRef` must be present;
+  - `resultRef` must be a valid path (validated via `isValidPath`);
+  - `entryStepId` cannot point to a TERMINAL step with `resultRef` (compile-time error).
 
-- legacy pre-canon runtime model
+- **Runtime validation** for resolved `resultRef` value:
+  - must be a JSON-safe object;
+  - must have a non-empty string `outcome`;
+  - `status` must match the TERMINAL `subtype` (`COMPLETE` or `FAIL`).
+
+- **JSON Schema** (`dist/schema/flow.schema.json`) updated: TERMINAL step now allows `oneOf`
+  with either `result` or `resultRef`, with mutual exclusion enforced.
+
+- **13 new tests** covering: static result (backward compat), `resultRef` runtime resolution,
+  path-missing error, status mismatch error, missing outcome error, compile-time validation
+  (both/neither/invalid path/entry resultRef), `validateFlow` coverage.
+
+### Changed
+
+- `NormalizedTerminalStep.result` is now optional (present only when using static `result`).
+  `NormalizedTerminalStep.resultRef` is present when using dynamic `resultRef`.
+  This is a **minor breaking change** for consumers inspecting `NormalizedTerminalStep` — see COMPATIBILITY.
+
+## [1.0.0] — 2026-04-15
+
+- Initial canonical release aligned to Flow3 specification.
+- Introduced `plan`, `reduce`, `apply`, `resume`, `createProcessState`, `validateFlow`, `prepareFlow`.
+- Canonical `PROCESS / CONTROL / EFFECT / WAIT / TERMINAL` step taxonomy.
+- Transport-safe `ProcessState` shape.
+- `CONTROL` steps resolved entirely inside semantics.
+- `TERMINAL` with static inline `result`.

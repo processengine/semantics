@@ -111,7 +111,7 @@ A Flow3 artifact is a JSON object with `id`, `version`, `entryStepId`, and `step
 | `CONTROL`   | `ROUTE` `SWITCH`             | semantics (internal) | Routing — resolved by `plan()`, never reach `executeStep` |
 | `EFFECT`    | `COMMAND` `CALL` `SUBFLOW`   | orchestrator       | External side effects |
 | `WAIT`      | `MESSAGE` (`WAIT/MESSAGE`)   | orchestrator       | Suspend until external result arrives |
-| `TERMINAL`  | `COMPLETE` `FAIL`            | semantics          | End the process |
+| `TERMINAL`  | `COMPLETE` `FAIL`            | semantics          | End the process. Supports static `result` or dynamic `resultRef`. |
 
 ### Minimal Flow3 example
 
@@ -151,6 +151,12 @@ A Flow3 artifact is a JSON object with `id`, `version`, `entryStepId`, and `step
       "type": "TERMINAL",
       "subtype": "FAIL",
       "result": { "status": "FAIL", "outcome": "ORDER_INVALID" }
+
+// Or use resultRef for dynamic result (e.g. with per-field validation errors):
+//   "type": "TERMINAL",
+//   "subtype": "FAIL",
+//   "resultRef": "$.context.facts.validationRejectResult"
+// semantics resolves the path value and sets it as state.result
     }
   }
 }
@@ -248,7 +254,7 @@ step.type === 'PROCESS'  → step.artefactId, step.subtype, step.input
 step.type === 'CONTROL'  → step.subtype, step.selectedNextStepId
 step.type === 'EFFECT'   → step.operationId, step.subtype, step.input
 step.type === 'WAIT'     → step.sourceStepId, step.operationId, step.requestId
-step.type === 'TERMINAL' → step.subtype, step.result
+step.type === 'TERMINAL' → step.subtype, step.result (static) or step.resultRef (dynamic)
 ```
 
 ---

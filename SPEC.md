@@ -1,6 +1,6 @@
 # `@processengine/semantics` — Specification
 
-**Version:** 1.0.0  
+**Version:** 1.1.0  
 **DSL:** Flow3  
 **Role:** semantics layer of the ProcessEngine family
 
@@ -47,7 +47,7 @@ The `steps` field in a Flow3 artifact must be a non-empty object map (`Record<St
 | `CONTROL`  | `ROUTE` `SWITCH`             | semantics internally — never reach `executeStep` |
 | `EFFECT`   | `COMMAND` `CALL` `SUBFLOW`   | orchestrator   |
 | `WAIT`     | `MESSAGE` (`WAIT/MESSAGE`)   | orchestrator   |
-| `TERMINAL` | `COMPLETE` `FAIL`            | semantics      |
+| `TERMINAL` | `COMPLETE` `FAIL`            | semantics — resolves `result` or `resultRef` |
 
 ### 3.2. Executable PROCESS — `contract` binding
 
@@ -118,6 +118,38 @@ For `SUBFLOW`, `flowId` and `flowVersion` are required:
 | `context.effects`  | `apply(...)` / `resume(...)` |
 | `context.steps`    | trace (when `traceMode !== 'off'`) |
 
+### 3.5. TERMINAL step
+
+`TERMINAL` ends the process. Semantics sets `state.status` and `state.result` and no further runtime calls are allowed.
+
+A TERMINAL step must have exactly one of:
+
+**Static `result`** — inline JSON-safe object:
+```json
+{
+  "type": "TERMINAL", "subtype": "FAIL",
+  "result": { "status": "FAIL", "outcome": "VALIDATION_REJECT", "reasonCode": "..." }
+}
+```
+
+**Dynamic `resultRef`** — path to a value pre-computed in process state:
+```json
+{
+  "type": "TERMINAL", "subtype": "FAIL",
+  "resultRef": "$.context.facts.validationRejectResult"
+}
+```
+
+When `resultRef` is used, semantics reads the value at that path when the process transitions into the TERMINAL step. The resolved value must be:
+- a JSON-safe object;
+- have a non-empty string `outcome`;
+- have `status` matching the step `subtype` (`COMPLETE` or `FAIL`).
+
+`resultRef` cannot be used when the step is `entryStepId` (compile-time error).
+
+`resultRef` is the canonical mechanism for dynamic terminal payloads — the host runtime must not post-process `state.result` after semantics has set it.
+
+
 ---
 
 ## 4. Public API
@@ -187,7 +219,7 @@ Delivers an external result to a WAIT step. Transitions process from `WAITING` b
 | `CONTROL`  | `subtype`, `selectedNextStepId` |
 | `EFFECT`   | `operationId`, `subtype`, `input` |
 | `WAIT`     | `sourceStepId`, `operationId`, `requestId` |
-| `TERMINAL` | `subtype`, `result` |
+| `TERMINAL` | `subtype`, `result` (static) or `resultRef` (dynamic) |
 
 ---
 

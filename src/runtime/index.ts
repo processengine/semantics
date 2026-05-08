@@ -10,7 +10,7 @@ import type {
   PreparedWaitStep,
 } from '../compiler/compiled.js';
 import { asPreparedFlowInternal } from '../compiler/compiled.js';
-import type { ExecutableProcessSubtype } from '../dsl/types.js';
+import type { ExecutableProcessSubtype, TerminalResult } from '../dsl/types.js';
 import { XRuntimeError } from '../errors/index.js';
 import { isNonEmptyString, isRecord } from '../utils/guards.js';
 import { isJsonSafe, type JsonObject } from '../utils/json.js';
@@ -233,11 +233,20 @@ function buildTransitionTarget(flow: PreparedFlowInternal, stepId: string): Tran
   const step = ensurePreparedStep(flow, stepId);
 
   if (step.type === 'TERMINAL') {
+    const terminalStep = step as PreparedTerminalStep;
+    if (terminalStep.resultRef) {
+      return {
+        stepId: step.id,
+        type: 'TERMINAL',
+        subtype: step.subtype,
+        resultRef: terminalStep.resultRef,
+      };
+    }
     return {
       stepId: step.id,
       type: 'TERMINAL',
       subtype: step.subtype,
-      result: structuredClone(step.result),
+      result: structuredClone(terminalStep.result!),
     };
   }
 
@@ -340,8 +349,39 @@ function followTransition(state: ProcessState, target: TransitionTarget, at: str
   }
 
   if (target.type === 'TERMINAL') {
-    state.status = target.result.status;
-    state.result = structuredClone(target.result);
+    let result: TerminalResult;
+
+    if (target.resultRef) {
+      const resolved = getPath(state, target.resultRef);
+      if (!resolved.found || !isRecord(resolved.value) || !isJsonSafe(resolved.value)) {
+        throw new XRuntimeError(
+          'FLOW_RESULT_REF_NOT_RESOLVED',
+          `TERMINAL resultRef path is missing or not a JSON-safe object: ${target.resultRef}`,
+          { resultRef: target.resultRef, stepId: target.stepId },
+        );
+      }
+      const dynamic = resolved.value as Record<string, unknown>;
+      if (!isNonEmptyString(dynamic['outcome'])) {
+        throw new XRuntimeError(
+          'FLOW_RESULT_REF_SHAPE_INVALID',
+          `Value at resultRef must have a non-empty string "outcome": ${target.resultRef}`,
+          { resultRef: target.resultRef, stepId: target.stepId },
+        );
+      }
+      if (dynamic['status'] !== target.subtype) {
+        throw new XRuntimeError(
+          'FLOW_RESULT_REF_SHAPE_INVALID',
+          `Value at resultRef "status" must match TERMINAL subtype "${target.subtype}": ${target.resultRef}`,
+          { resultRef: target.resultRef, stepId: target.stepId, status: dynamic['status'] },
+        );
+      }
+      result = structuredClone(dynamic) as TerminalResult;
+    } else {
+      result = structuredClone(target.result!);
+    }
+
+    state.status = result.status;
+    state.result = result;
     state.currentStepId = target.stepId;
     state.currentStepType = 'TERMINAL';
     state.currentStepSubtype = target.subtype;
@@ -464,8 +504,22 @@ export function createProcessState(params: CreateProcessStateParams): ProcessSta
   }
 
   if (entryStep.type === 'TERMINAL') {
-    state.status = entryStep.result.status;
-    state.result = structuredClone(entryStep.result);
+    const terminalEntry = entryStep as PreparedTerminalStep;
+    let entryResult: TerminalResult;
+    if (terminalEntry.resultRef) {
+      // resultRef at entry is forbidden by validateFlow.
+      // If somehow reached (e.g. prepareFlow used without validateFlow),
+      // fail clearly rather than silently using empty context.
+      throw new XRuntimeError(
+        'FLOW_RESULT_REF_NOT_RESOLVED',
+        'TERMINAL with resultRef cannot be the entryStepId: dynamic terminal result must be produced by a prior process step',
+        { stepId: entryStep.id, resultRef: terminalEntry.resultRef },
+      );
+    } else {
+      entryResult = structuredClone(terminalEntry.result!);
+    }
+    state.status = entryResult.status;
+    state.result = entryResult;
     updateStepTrace(state, entryStep.id, {
       status: 'COMPLETED',
       startedAt: createdAt,
@@ -559,11 +613,20 @@ export function plan(flow: PreparedFlow, state: ProcessState): NormalizedStep {
     return normalized;
   }
 
+  const terminalPlan = currentStep as PreparedTerminalStep;
+  if (terminalPlan.resultRef) {
+    return {
+      id: terminalPlan.id,
+      type: 'TERMINAL',
+      subtype: terminalPlan.subtype,
+      resultRef: terminalPlan.resultRef,
+    } satisfies NormalizedTerminalStep;
+  }
   return {
-    id: currentStep.id,
+    id: terminalPlan.id,
     type: 'TERMINAL',
-    subtype: (currentStep as PreparedTerminalStep).subtype,
-    result: structuredClone((currentStep as PreparedTerminalStep).result),
+    subtype: terminalPlan.subtype,
+    result: structuredClone(terminalPlan.result!),
   } satisfies NormalizedTerminalStep;
 }
 

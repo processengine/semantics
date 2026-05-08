@@ -108,7 +108,15 @@ export interface WaitStepDefinition extends StepDefinitionBase {
 export interface TerminalStepDefinition extends StepDefinitionBase {
   type: 'TERMINAL';
   subtype: TerminalResultStatus;
-  result: TerminalResult;
+  /** Static inline result. Exactly one of `result` or `resultRef` must be present. */
+  result?: TerminalResult;
+  /**
+   * Path to a dynamic terminal result stored in process state (e.g. `$.context.facts.myResult`).
+   * The value at this path must be a JSON-safe object with `status` and `outcome` fields,
+   * and `status` must match the step subtype.
+   * Exactly one of `result` or `resultRef` must be present.
+   */
+  resultRef?: PathRef;
 }
 
 export type ProcessStepDefinition = ExecutableProcessStepDefinition;
