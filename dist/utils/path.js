@@ -1,7 +1,7 @@
 import { XRuntimeError } from '../errors/index.js';
 import { isNonEmptyString, isRecord } from './guards.js';
 const IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/u;
-const WRITABLE_ZONE_NAMES = new Set(['checks', 'facts', 'decisions']);
+const WRITABLE_ZONE_NAMES = new Set(['data']);
 function readQuotedSegment(path, index) {
     const quote = path[index];
     if (quote !== '"' && quote !== "'")
@@ -152,33 +152,15 @@ export function setPath(target, path, value) {
     }
     return clone;
 }
-function resolveInputObject(target, inputRef) {
-    const resolved = {};
-    for (const [key, nested] of Object.entries(inputRef)) {
-        if (typeof nested === 'string') {
-            const pathResult = getPath(target, nested);
-            if (!pathResult.found) {
-                throw new XRuntimeError('FLOW_PATH_NOT_RESOLVED', `Path is not resolved: ${nested}`, { path: nested });
-            }
-            resolved[key] = pathResult.value;
-            continue;
-        }
-        resolved[key] = resolveInputObject(target, nested);
-    }
-    return resolved;
-}
 export function resolveInput(target, inputRef) {
-    if (typeof inputRef === 'string') {
-        const pathResult = getPath(target, inputRef);
-        if (!pathResult.found) {
-            throw new XRuntimeError('FLOW_PATH_NOT_RESOLVED', `Path is not resolved: ${inputRef}`, { path: inputRef });
-        }
-        return pathResult.value;
+    const pathResult = getPath(target, inputRef);
+    if (!pathResult.found) {
+        throw new XRuntimeError('FLOW_PATH_NOT_RESOLVED', `Path is not resolved: ${inputRef}`, { path: inputRef });
     }
-    return resolveInputObject(target, inputRef);
+    return pathResult.value;
 }
 export function isPathObject(value) {
-    return isRecord(value);
+    return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 export function isIdentifierSegment(segment) {
     return IDENTIFIER_RE.test(segment);

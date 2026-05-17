@@ -1,263 +1,240 @@
-# `@processengine/semantics` — Спецификация
+# @processengine/semantics v2 — Нормативная спецификация Flow 5
 
-**Версия:** 1.1.0  
-**DSL:** Flow3  
-**Роль:** семантический слой семейства ProcessEngine
+## Что нормативно определяет этот документ
 
----
+Нормативная спецификация `@processengine/semantics v2`.
 
-## 1. Назначение
+Определяет:
+- Таксономию шагов Flow 5 и DSL-контракт
+- Контракт process state (ProcessContext, ProcessState)
+- Публичный API: validateFlow, prepareFlow, createProcessState, plan, reduce, apply, resume
+- Runtime-семантику для каждого типа шага
+- Коды ошибок и диагностических сообщений
 
-`semantics` — движок смысла процесса в семействе ProcessEngine. Интерпретирует **Flow3** — каноническую декларативную DSL-форму описания процессов — и обеспечивает transport-safe, детерминированные переходы состояния процесса.
+## Таксономия шагов Flow 5
 
-`semantics` владеет: валидацией и подготовкой DSL, `plan(...)`, `reduce(...)`, `apply(...)`, `resume(...)`, канонической формой состояния процесса, внутренней резолюцией CONTROL-шагов.
+| Шаг | Subtype | Назначение |
+|-----|---------|-----------|
+| PROCESS | DATA | Синхронная обработка данных через dataflow artifact |
+| CONTROL | ROUTE | Маршрутизация по скалярному значению из state |
+| EFFECT | COMMAND, CALL, SUBFLOW | Асинхронный внешний вызов или запуск subflow |
+| WAIT | MESSAGE | Ожидание ответа на EFFECT |
+| TERMINAL | COMPLETE, FAIL | Завершение процесса |
 
-`semantics` не владеет: выполнением модулей, персистенцией, транспортом, retry, планировщиком, диспетчеризацией внешних эффектов, генерацией `requestId`.
+**Удалено в Flow 5 (не поддерживается):**
+- `PROCESS/RULES`, `PROCESS/MAPPINGS`, `PROCESS/DECISIONS` → заменены на `PROCESS/DATA`
+- `CONTROL/SWITCH`, `factRef` → заменены на `CONTROL/ROUTE` с полем `ref`
 
----
+## ProcessContext (Flow 5)
 
-## 2. Архитектура
-
-```
-Flow3-артефакт
-     │
-     ▼
- semantics          (эта библиотека)
-     │
-     ▼
- orchestrator       запускает модули, сохраняет state, диспетчеризует эффекты
-     │
-     ▼
- runtime            инфраструктура: Kafka, HTTP, БД, таймеры
-```
-
-Оркестратор **не должен** интерпретировать семантику Flow3 (условия маршрутизации, граф шагов, резолюция путей). `semantics` **не должна** выполнять инфраструктурные обязанности. Это нормативная граница.
-
----
-
-## 3. DSL Flow3
-
-### 3.1. Таксономия шагов
-
-Поле `steps` в Flow3-артефакте должен быть непустым объектом-маппингом (`Record<StepId, StepDefinition>`).
-
-| `type`     | `subtype`                    | Кто исполняет           |
-|------------|------------------------------|-------------------------|
-| `PROCESS`  | `RULES` `MAPPINGS` `DECISIONS` | оркестратор через `executeStep` |
-| `CONTROL`  | `ROUTE` `SWITCH`             | semantics внутренне — до `executeStep` не доходят |
-| `EFFECT`   | `COMMAND` `CALL` `SUBFLOW`   | оркестратор             |
-| `WAIT`     | `MESSAGE` (`WAIT/MESSAGE`)   | оркестратор             |
-| `TERMINAL` | `COMPLETE` `FAIL`            | semantics — резолвит `result` или `resultRef` | semantics               |
-
-### 3.2. Executable PROCESS — привязка через `contract`
-
-Executable `PROCESS`-шаги (RULES, MAPPINGS, DECISIONS) используют `contract.input.ref` и `contract.output.ref`:
-
-```json
-{
-  "type": "PROCESS",
-  "subtype": "RULES",
-  "artefactId": "rules.validate",
-  "contract": {
-    "input":  { "ref": "$.context.input" },
-    "output": { "ref": "$.context.checks.validation" }
-  },
-  "nextStepId": "next"
+```ts
+interface ProcessContext {
+  input: Record<string, unknown>;        // входные данные процесса
+  data: {
+    payloads:  Record<string, unknown>;  // промежуточные payload между системами
+    facts:     Record<string, unknown>;  // decision-ready признаки ситуации
+    decisions: Record<string, unknown>;  // принятые решения из dataflow
+    checks:    Record<string, unknown>;  // результаты rule-проверок
+    results:   Record<string, unknown>;  // результаты для TERMINAL.resultRef
+  };
+  effects: Record<string, unknown>;      // ответы внешних систем (EFFECT/WAIT)
+  steps:   Record<string, StepRuntimeState>; // trace only
 }
 ```
 
-`contract.input.ref` — резолвируется `plan(...)` в `step.input`.  
-`contract.output.ref` — используется `reduce(...)` для записи вывода модуля в state.  
-`inputRef` / `outputRef` **запрещены** на executable PROCESS шагах.
+**Удалены из Flow 5:** `context.facts`, `context.decisions`, `context.checks` — использовать `context.data.*`.
 
-### 3.3. CONTROL-шаги
+## ProcessState (Flow 5)
 
-`CONTROL/ROUTE` читает `factRef` (скалярный путь) и выбирает ветку из `cases`.  
-`CONTROL/SWITCH` читает `context.decisions[decisionSetId].outcome` и выбирает из `cases`.  
-Оба должны иметь `defaultNextStepId`. Оба резолвируются полностью внутри `semantics`.
-
-```json
-{ "type": "CONTROL", "subtype": "ROUTE", "factRef": "$.context.facts.ok",
-  "cases": { "true": "step_ok", "false": "step_fail" }, "defaultNextStepId": "step_fail" }
-```
-
-### 3.4. EFFECT-шаги
-
-```json
-{ "type": "EFFECT", "subtype": "COMMAND", "operationId": "abs.create",
-  "inputRef": "$.context.facts.request", "nextStepId": "wait_abs", "onErrorStepId": "finish_fail" }
-```
-
-`inputRef` — каноническая привязка входа для `EFFECT`-шагов. `operationId` — ключ диспетчеризации для оркестратора.
-
-Для `SUBFLOW` обязательны `flowId` и `flowVersion`:
-
-```json
-{ "type": "EFFECT", "subtype": "SUBFLOW", "operationId": "child.process",
-  "flowId": "child.flow", "flowVersion": "2026-04-01",
-  "inputRef": "$.context.facts.input", "nextStepId": "wait_child" }
-```
-
-### 3.5. WAIT-шаг
-
-```json
-{ "type": "WAIT", "subtype": "MESSAGE", "sourceStepId": "send_command",
-  "nextStepId": "next", "onErrorStepId": "finish_fail", "onTimeoutStepId": "finish_timeout" }
-```
-
-`plan(...)` материализует `operationId` (из исходного EFFECT-шага) и `requestId` (из `context.effects`) в нормализованный WAIT-шаг.
-
-### 3.6. Пространства имён контекста
-
-| Зона                | Записывает              |
-|--------------------|-------------------------|
-| `context.input`    | `createProcessState`    |
-| `context.checks`   | executable PROCESS      |
-| `context.facts`    | executable PROCESS      |
-| `context.decisions`| DECISIONS-шаги          |
-| `context.effects`  | `apply(...)` / `resume(...)` |
-| `context.steps`    | трейс (при `traceMode !== 'off'`) |
-
-### 3.5. Шаг TERMINAL
-
-`TERMINAL` завершает процесс. Semantics устанавливает `state.status` и `state.result`.
-
-Шаг TERMINAL должен содержать ровно одно из:
-
-**Статический `result`** — встроенный JSON-объект:
-```json
-{
-  "type": "TERMINAL", "subtype": "FAIL",
-  "result": { "status": "FAIL", "outcome": "VALIDATION_REJECT" }
+```ts
+interface ProcessState {
+  processId:          string;
+  flowId:             string;   // в v1 было 'id'
+  flowVersion:        string;   // в v1 было 'version'
+  status:             'ACTIVE' | 'WAITING' | 'COMPLETE' | 'FAIL';
+  currentStepId:      string;
+  currentStepType:    string;
+  currentStepSubtype: string;
+  context:            ProcessContext;
+  history:            ProcessHistoryEntry[];
+  result:             TerminalResult | null;
+  meta:               JsonObject;
+  traceMode:          'off' | 'basic' | 'verbose';
 }
 ```
 
-**Динамический `resultRef`** — путь к значению, вычисленному ранее в state:
-```json
-{
-  "type": "TERMINAL", "subtype": "FAIL",
-  "resultRef": "$.context.facts.validationRejectResult"
-}
-```
+## Определения шагов
 
-При использовании `resultRef` semantics при переходе в TERMINAL-шаг читает значение по указанному пути. Значение должно быть JSON-safe объектом с непустым `outcome` и `status`, совпадающим с `subtype`.
-
-`resultRef` — канонический механизм для динамических финальных payload. Хост-сервис **не должен** изменять `state.result` после того, как semantics его установил.
-
-
----
-
-## 4. Публичный API
-
-```
-validateFlow(flow, options?)  -> ValidationResult
-prepareFlow(flow, options?)   -> PreparedFlow
-
-createProcessState(params)                         -> ProcessState
-plan(preparedFlow, state)                          -> NormalizedStep
-reduce(step, state, output)                        -> ProcessState
-apply(preparedFlow, state, stepId, effectResult)   -> ProcessState
-resume(preparedFlow, state, stepId, waitResult)    -> ProcessState
-```
-
-### 4.1. `validateFlow(flow, options?)`
-
-Возвращает `{ isValid: boolean; errors: ValidationIssue[]; warnings: ValidationIssue[] }`.  
-Не должна бросать исключение для обычных DSL-проблем.
-
-### 4.2. `prepareFlow(flow, options?)`
-
-Возвращает иммутабельный `PreparedFlow`. Бросает `XCompileError`, если артефакт невалиден.
-
-### 4.3. `createProcessState(params)`
-
-```
-createProcessState({ flow: PreparedFlow, processId: string, input?, meta?, trace? }) -> ProcessState
-```
-
-Создаёт канонический начальный `ProcessState`. Привязывает state к `preparedFlow.id` и `preparedFlow.version`. Устанавливает `currentStepId` в `preparedFlow.entryStepId`. Устанавливает `status: 'ACTIVE'`. Единственный канонический способ создать валидный начальный state.
-
-### 4.4. `plan(preparedFlow, state)`
-
-Детерминированно материализует текущий нормализованный шаг из `preparedFlow` и `state`, не мутируя state. Выполняет три операции:
-1. **Нормализация** — transport-safe пакет шага
-2. **Резолюция привязок** — разрешает `contract.input.ref` для PROCESS; `inputRef` для EFFECT; материализует `requestId` и `operationId` для WAIT
-3. **Control-резолюция** — для CONTROL-шагов вычисляет условие ветвления и несёт `selectedNextStepId` в результате
-
-### 4.5. `reduce(step, state, output)`
-
-Фиксирует переход состояния. Применяется к шагам `PROCESS` и `CONTROL`:
-- `PROCESS`: записывает `output` в `contract.output.ref`; переходит к `nextStepId`
-- `CONTROL`: фиксирует `selectedNextStepId`; `output` должен быть `null`
-
-### 4.6. `apply(preparedFlow, state, stepId, effectResult)`
-
-Регистрирует диспетчеризацию EFFECT-шага. Переводит процесс в `WAITING`. Устанавливает `context.effects[stepId].requestId`.
-
-Форма `effectResult`: `{ requestId: string; result: unknown; error: unknown; errorCode: string | null }`.
-
-### 4.7. `resume(preparedFlow, state, stepId, waitResult)`
-
-Доставляет внешний результат в WAIT-шаг. Переводит процесс из `WAITING` обратно в `ACTIVE` (или в ветку ошибки/таймаута).
-
-Форма `waitResult`: `{ requestId: string; result: unknown; error: unknown; errorCode: string | null }`.
-
----
-
-## 5. Нормализованный шаг
-
-`plan(...)` возвращает `NormalizedStep` — transport-safe самодостаточный пакет. Оркестратор читает только поля нормализованного шага; он не должен инспектировать `PreparedFlow` или `ProcessState` напрямую.
-
-| `step.type` | Ключевые поля |
-|------------|---------------|
-| `PROCESS`  | `artefactId`, `subtype`, `input` |
-| `CONTROL`  | `subtype`, `selectedNextStepId` |
-| `EFFECT`   | `operationId`, `subtype`, `input` |
-| `WAIT`     | `sourceStepId`, `operationId`, `requestId` |
-| `TERMINAL` | `subtype`, `result` |
-
----
-
-## 6. ProcessState
+### PROCESS/DATA
 
 ```ts
 {
-  id: string;          // flow id
-  version: string;     // версия flow (привязана при createProcessState)
-  processId: string;
-  status: 'ACTIVE' | 'WAITING' | 'COMPLETE' | 'FAIL';
-  traceMode: 'off' | 'basic' | 'verbose';
-  currentStepId: string;
-  currentStepType: string;
-  currentStepSubtype: string;
-  context: ProcessContext;
-  history: ProcessHistoryEntry[];
-  result: TerminalResult | null;
-  meta: JsonObject;
+  id:          string;   // обязательно
+  type:        'PROCESS';
+  subtype:     'DATA';
+  title:       string;   // обязательно
+  description: string;   // обязательно
+  artefactId:  string;   // обязательно — ID dataflow artifact
+  nextStepId:  string;   // обязательно
+  metadata?:   JsonObject;
 }
 ```
 
-`ProcessState` — это plain JSON-safe объект. Персистенцией и транспортом владеет оркестратор.
+**Запрещённые поля:** `contract`, `inputRef`, `outputRef`, `cases`, `onErrorStepId`.
 
----
+`PROCESS/DATA` не владеет контрактом данных. Контракт данных принадлежит dataflow artifact.
 
-## 7. Ошибки
+### CONTROL/ROUTE
 
-Два семейства ошибок:
+```ts
+{
+  id:              string;
+  type:            'CONTROL';
+  subtype:         'ROUTE';
+  title:           string;
+  description:     string;
+  ref:             string;                 // PathRef на скалярное значение в state
+  cases:           Record<string, string>; // значение → nextStepId
+  defaultNextStepId: string;
+  metadata?:       JsonObject;
+}
+```
 
-**`XCompileError`** — бросается `prepareFlow(...)` при структурно невалидном Flow3-артефакте. Имеет `code` (`FLOW_*`), `message`, опциональный `details`.
+Поведение `ref`:
+- Путь отсутствует в state → `FLOW_ROUTE_REF_NOT_RESOLVED` (runtime error)
+- Путь указывает на object/array → `FLOW_ROUTE_REF_NOT_SCALAR` (runtime error)
+- Нет совпадения в cases → `defaultNextStepId`
 
-**`XRuntimeError`** — бросается `plan(...)`, `reduce(...)`, `apply(...)`, `resume(...)` при нарушении runtime-контракта. Имеет `code` (`FLOW_*`), `message`, опциональный `details`.
+### EFFECT (COMMAND, CALL, SUBFLOW)
 
-Все `code` — стабильные идентификаторы (например `FLOW_STEP_MISMATCH`, `FLOW_PATH_NOT_RESOLVED`, `FLOW_REDUCE_INVALID_TYPE`). Оркестратор может использовать `code` для машиночитаемой обработки ошибок.
+```ts
+{
+  id:              string;
+  type:            'EFFECT';
+  subtype:         'COMMAND' | 'CALL' | 'SUBFLOW';
+  title:           string;
+  description:     string;
+  operationId:     string;   // обязательно
+  inputRef:        string;   // обязательно — только строковый PathRef
+  nextStepId:      string;   // обязательно
+  onErrorStepId:   string;   // обязательно — сбой внешней системы это lifecycle outcome
+  onTimeoutStepId?: string;
+  // Только для SUBFLOW:
+  flowId?:         string;
+  flowVersion?:    string;
+  metadata?:       JsonObject;
+}
+```
 
----
+### WAIT/MESSAGE
 
-## 8. Инварианты
+```ts
+{
+  id:              string;
+  type:            'WAIT';
+  subtype:         'MESSAGE';
+  title:           string;
+  description:     string;
+  sourceStepId:    string;   // обязательно — должен ссылаться на EFFECT шаг
+  nextStepId:      string;
+  onErrorStepId:   string;
+  onTimeoutStepId: string;
+  metadata?:       JsonObject;
+}
+```
 
-- `plan(...)` детерминирован: одинаковые `preparedFlow` + `state` всегда возвращают один и тот же `NormalizedStep`
-- `plan(...)` никогда не мутирует state
-- Все публичные runtime-контракты transport-safe (JSON-safe)
-- `ProcessState.version` должна совпадать с `PreparedFlow.version` — проверяется при каждом вызове `plan(...)`
-- Оркестратор не должен вызывать `reduce(...)` для шагов `EFFECT`, `WAIT`, `TERMINAL`
-- Оркестратор не должен конструировать `ProcessState` вручную — только через `createProcessState(...)`
+### TERMINAL (COMPLETE, FAIL)
+
+```ts
+{
+  id:          string;
+  type:        'TERMINAL';
+  subtype:     'COMPLETE' | 'FAIL';
+  title:       string;
+  description: string;
+  // ровно одно из result или resultRef:
+  result?:     { status: 'COMPLETE'|'FAIL'; outcome: string; [k: string]: JsonValue };
+  resultRef?:  string; // должен начинаться с $.context.data.results.
+  metadata?:   JsonObject;
+}
+```
+
+`result.status` должен совпадать с `subtype`. `resultRef` должен указывать в `$.context.data.results.*`.
+
+## Публичный API
+
+```ts
+validateFlow(source, options?) → ValidationResult
+prepareFlow(source, options?)  → PreparedFlow        // throws XCompileError если невалидно
+createProcessState(params)     → ProcessState
+plan(flow, state)              → NormalizedStep
+reduce(step, state, output)    → ProcessState
+apply(flow, state, stepId, effectResult) → ProcessState
+resume(flow, state, stepId, waitResult)  → ProcessState
+```
+
+## Runtime-семантика
+
+### plan
+
+Возвращает нормализованный шаг для текущего состояния. State не мутирует.
+
+Для `PROCESS/DATA`:
+```ts
+{ id, type: 'PROCESS', subtype: 'DATA', artefactId, nextStepId }
+// Нет input — orchestrator не видит внутренности dataflow
+```
+
+Для `CONTROL/ROUTE`:
+```ts
+{ id, type: 'CONTROL', subtype: 'ROUTE', selectedNextStepId }
+// Резолвит ref и выбирает case внутри
+```
+
+### reduce
+
+```
+reduce(PROCESS/DATA, state, DataflowOutput) → ProcessState
+  DataflowOutput = { writes: DataflowWrite[], trace?: unknown[] }
+  Каждый write.ref должен начинаться с $.context.data.
+  Каждый write.value должен быть JSON-safe
+  writes применяются атомарно к context.data.*
+  После применения — переход на nextStepId
+
+reduce(CONTROL/ROUTE, state, null) → ProcessState
+  Переходит на selectedNextStepId
+
+reduce(TERMINAL, state, null) → ProcessState
+  static result → устанавливает state.status, state.result
+  resultRef → резолвит из context.data.results.*, проверяет shape, устанавливает state.status, state.result
+  Возвращает финализированный terminal state
+
+```
+
+## Коды диагностики валидации
+
+| Код | Когда возникает |
+|-----|----------------|
+| `FLOW_INVALID_SUBTYPE` | PROCESS/RULES, MAPPINGS, DECISIONS, CONTROL/SWITCH |
+| `FLOW_DATA_STEP_FORBIDDEN_FIELD` | contract/inputRef/cases/onErrorStepId на DATA шаге |
+| `FLOW_ROUTE_FACTREF_REMOVED` | factRef на ROUTE шаге |
+| `FLOW_EFFECT_ON_ERROR_MISSING` | EFFECT без onErrorStepId |
+| `FLOW_TRANSITION_NOT_FOUND` | nextStepId/case/default ссылается на несуществующий шаг |
+| `FLOW_WAIT_SOURCE_NOT_EFFECT` | WAIT.sourceStepId не является EFFECT шагом |
+| `FLOW_TERMINAL_RESULT_STATUS_MISMATCH` | result.status ≠ subtype (COMPLETE/FAIL) |
+| `FLOW_TERMINAL_RESULTREF_INVALID` | resultRef не в $.context.data.results.* |
+| `FLOW_METADATA_INVALID` | metadata — не JSON-safe plain object |
+
+## Коды runtime ошибок
+
+| Код | Когда возникает |
+|-----|----------------|
+| `FLOW_ROUTE_REF_NOT_RESOLVED` | ref путь отсутствует в state |
+| `FLOW_ROUTE_REF_NOT_SCALAR` | ref указывает на object/array |
+| `FLOW_DATA_OUTPUT_INVALID` | DataflowOutput не { writes: array } |
+| `FLOW_DATA_WRITE_FORBIDDEN_PATH` | write.ref не в $.context.data.* |
+| `FLOW_DATA_WRITE_NOT_JSON_SAFE` | write.value не JSON-safe |
+| `FLOW_TERMINAL_MISUSED` | runtime method вызван на уже-terminal state |
+| `FLOW_RESULT_REF_NOT_RESOLVED` | resultRef путь отсутствует в state |
+| `FLOW_RESULT_REF_SHAPE_INVALID` | значение по resultRef имеет неверный shape |
+| `FLOW_RUNTIME_INPUT_INVALID` | невалидный аргумент публичного API |

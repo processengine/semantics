@@ -1,5 +1,5 @@
 import type { PreparedFlow } from '../compiler/compiled.js';
-import type { EffectStepSubtype, ControlStepSubtype, ExecutableProcessSubtype, StepId, StepType, TerminalResult, TerminalResultStatus, WaitStepSubtype } from '../dsl/types.js';
+import type { EffectStepSubtype, StepId, StepType, TerminalResult, TerminalResultStatus, WaitStepSubtype } from '../dsl/types.js';
 import type { JsonObject } from '../utils/json.js';
 export type ProcessStatus = 'ACTIVE' | 'WAITING' | 'COMPLETE' | 'FAIL';
 export type StepTraceStatus = 'COMPLETED' | 'WAITING' | 'FAILED';
@@ -13,14 +13,18 @@ export interface StepRuntimeState {
     selectedNextStepId?: StepId;
     requestId?: string;
 }
-export interface ProcessContext {
-    input: Record<string, unknown>;
-    checks: Record<string, unknown>;
+export interface ProcessDataContext {
+    payloads: Record<string, unknown>;
     facts: Record<string, unknown>;
     decisions: Record<string, unknown>;
-    steps: Record<string, StepRuntimeState>;
+    checks: Record<string, unknown>;
+    results: Record<string, unknown>;
+}
+export interface ProcessContext {
+    input: Record<string, unknown>;
+    data: ProcessDataContext;
     effects: Record<string, unknown>;
-    [key: string]: unknown;
+    steps: Record<string, StepRuntimeState>;
 }
 export interface ProcessHistoryEntry {
     at: string;
@@ -30,8 +34,8 @@ export interface ProcessHistoryEntry {
 }
 export interface ProcessState {
     processId: string;
-    id: string;
-    version: string;
+    flowId: string;
+    flowVersion: string;
     traceMode: FlowTraceMode;
     status: ProcessStatus;
     currentStepId: StepId;
@@ -52,12 +56,12 @@ export interface CreateProcessStateParams {
 export interface ProcessTransitionTarget {
     stepId: StepId;
     type: 'PROCESS';
-    subtype: ExecutableProcessSubtype;
+    subtype: 'DATA';
 }
 export interface ControlTransitionTarget {
     stepId: StepId;
     type: 'CONTROL';
-    subtype: ControlStepSubtype;
+    subtype: 'ROUTE';
 }
 export interface EffectTransitionTarget {
     stepId: StepId;
@@ -74,29 +78,21 @@ export interface TerminalTransitionTarget {
     stepId: StepId;
     type: 'TERMINAL';
     subtype: TerminalResultStatus;
-    /** Present when TERMINAL uses static inline result. */
     result?: TerminalResult;
-    /** Present when TERMINAL uses dynamic resultRef. Resolved at followTransition time. */
     resultRef?: string;
 }
 export type TransitionTarget = ProcessTransitionTarget | ControlTransitionTarget | EffectTransitionTarget | WaitTransitionTarget | TerminalTransitionTarget;
-export interface NormalizedExecutableProcessStep {
+export interface NormalizedDataProcessStep {
     id: StepId;
     type: 'PROCESS';
-    subtype: ExecutableProcessSubtype;
+    subtype: 'DATA';
     artefactId: string;
-    input: unknown;
+    nextStepId: StepId;
 }
 export interface NormalizedRouteStep {
     id: StepId;
     type: 'CONTROL';
     subtype: 'ROUTE';
-    selectedNextStepId: StepId;
-}
-export interface NormalizedSwitchStep {
-    id: StepId;
-    type: 'CONTROL';
-    subtype: 'SWITCH';
     selectedNextStepId: StepId;
 }
 export interface NormalizedEffectStep {
@@ -105,9 +101,7 @@ export interface NormalizedEffectStep {
     subtype: EffectStepSubtype;
     operationId: string;
     input: unknown;
-    /** Present only when subtype is 'SUBFLOW' */
     flowId?: string;
-    /** Present only when subtype is 'SUBFLOW' */
     flowVersion?: string;
 }
 export interface NormalizedWaitStep {
@@ -116,20 +110,17 @@ export interface NormalizedWaitStep {
     subtype: WaitStepSubtype;
     sourceStepId: StepId;
     requestId?: string;
-    /** operationId of the source EFFECT step. Materialized by plan(...) for Host consumer dispatch. */
     operationId?: string;
 }
 export interface NormalizedTerminalStep {
     id: StepId;
     type: 'TERMINAL';
     subtype: TerminalResultStatus;
-    /** Present when using static inline result. */
     result?: TerminalResult;
-    /** Present when using dynamic resultRef. The ref is resolved at followTransition time. */
     resultRef?: string;
 }
-export type NormalizedProcessStep = NormalizedExecutableProcessStep;
-export type NormalizedControlStep = NormalizedRouteStep | NormalizedSwitchStep;
+export type NormalizedProcessStep = NormalizedDataProcessStep;
+export type NormalizedControlStep = NormalizedRouteStep;
 export type NormalizedStep = NormalizedProcessStep | NormalizedControlStep | NormalizedEffectStep | NormalizedWaitStep | NormalizedTerminalStep;
 export interface ExternalResult {
     requestId: string;
@@ -139,3 +130,12 @@ export interface ExternalResult {
 }
 export type EffectResult = ExternalResult;
 export type WaitResult = ExternalResult;
+export interface DataflowWrite {
+    ref: string;
+    value: unknown;
+    itemId: string;
+}
+export interface DataflowOutput {
+    writes: DataflowWrite[];
+    trace?: unknown[];
+}

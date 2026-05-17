@@ -1,7 +1,7 @@
 import type {
   PreparedEffectStep,
   PreparedControlStep,
-  PreparedExecutableProcessStep,
+  PreparedDataProcessStep,
   PreparedFlow,
   PreparedFlowInternal,
   PreparedProcessStep,
@@ -10,22 +10,23 @@ import type {
   PreparedWaitStep,
 } from '../compiler/compiled.js';
 import { asPreparedFlowInternal } from '../compiler/compiled.js';
-import type { ExecutableProcessSubtype, TerminalResult } from '../dsl/types.js';
+import type { TerminalResult } from '../dsl/types.js';
 import { XRuntimeError } from '../errors/index.js';
 import { isNonEmptyString, isRecord } from '../utils/guards.js';
 import { isJsonSafe, type JsonObject } from '../utils/json.js';
 import { getPath, resolveInput, setPath } from '../utils/path.js';
 import type {
   CreateProcessStateParams,
+  DataflowOutput,
+  DataflowWrite,
   EffectResult,
   FlowTraceMode,
-  NormalizedEffectStep,
   NormalizedControlStep,
-  NormalizedExecutableProcessStep,
+  NormalizedDataProcessStep,
+  NormalizedEffectStep,
   NormalizedProcessStep,
   NormalizedRouteStep,
   NormalizedStep,
-  NormalizedSwitchStep,
   NormalizedTerminalStep,
   NormalizedWaitStep,
   ProcessContext,
@@ -36,8 +37,7 @@ import type {
   WaitResult,
 } from './types.js';
 
-interface NormalizedExecutableProcessStepInternal extends NormalizedExecutableProcessStep {
-  outputRef: string;
+interface NormalizedDataProcessStepInternal extends NormalizedDataProcessStep {
   next: TransitionTarget;
 }
 
@@ -45,9 +45,7 @@ interface NormalizedRouteStepInternal extends NormalizedRouteStep {
   next: TransitionTarget;
 }
 
-interface NormalizedSwitchStepInternal extends NormalizedSwitchStep {
-  next: TransitionTarget;
-}
+
 
 
 
@@ -57,11 +55,10 @@ export type {
   FlowTraceMode,
   NormalizedEffectStep,
   NormalizedControlStep,
-  NormalizedExecutableProcessStep,
+  NormalizedDataProcessStep,
   NormalizedProcessStep,
   NormalizedRouteStep,
   NormalizedStep,
-  NormalizedSwitchStep,
   NormalizedTerminalStep,
   NormalizedWaitStep,
   ProcessContext,
@@ -82,9 +79,13 @@ function cloneState(state: ProcessState): ProcessState {
 function buildContext(input?: Record<string, unknown>): ProcessContext {
   return {
     input: structuredClone(input ?? {}),
-    checks: {},
-    facts: {},
-    decisions: {},
+    data: {
+      payloads: {},
+      facts: {},
+      decisions: {},
+      checks: {},
+      results: {},
+    },
     steps: {},
     effects: {},
   };
@@ -110,6 +111,32 @@ function ensureJsonObject(value: unknown, field: string): JsonObject {
     throw new XRuntimeError('FLOW_STATE_INVALID', `${field} must be a JSON-safe object`, { field });
   }
   return structuredClone(value) as JsonObject;
+}
+
+function ensureRuntimeObject(value: unknown, method: string, field: string): asserts value is Record<string, unknown> {
+  if (!isRecord(value)) {
+    throw new XRuntimeError('FLOW_RUNTIME_INPUT_INVALID', `${method}: ${field} must be a non-null object`, { field });
+  }
+}
+
+function ensurePreparedFlowInput(value: unknown, method: string): PreparedFlowInternal {
+  ensureRuntimeObject(value, method, 'flow');
+  const flow = asPreparedFlowInternal(value as unknown as PreparedFlow);
+  if (!isNonEmptyString(flow.id) || !isNonEmptyString(flow.version) || !isNonEmptyString(flow.entryStepId) || !isRecord(flow.stepsById)) {
+    throw new XRuntimeError('FLOW_RUNTIME_INPUT_INVALID', `${method}: flow must be a prepared flow object from prepareFlow()`, {});
+  }
+  return flow;
+}
+
+function ensureProcessStateInput(value: unknown, method: string): asserts value is ProcessState {
+  ensureRuntimeObject(value, method, 'state');
+}
+
+function ensureStepIdInput(value: unknown, method: string): string {
+  if (!isNonEmptyString(value)) {
+    throw new XRuntimeError('FLOW_RUNTIME_INPUT_INVALID', `${method}: stepId must be a non-empty string`, { stepId: value });
+  }
+  return value;
 }
 
 function ensureJsonSafeValue(value: unknown, field: string): void {
@@ -158,9 +185,12 @@ function ensurePreparedStep(flow: PreparedFlowInternal, stepId: string): Prepare
 
 function ensureStateMatchesFlow(flow: PreparedFlowInternal, state: ProcessState): PreparedStep {
   ensureNonEmptyStringState(state.processId, 'processId');
-  ensureNonEmptyStringState(state.id, 'id');
-  ensureNonEmptyStringState(state.version, 'version');
+  ensureNonEmptyStringState(state.flowId, 'flowId');
+  ensureNonEmptyStringState(state.flowVersion, 'flowVersion');
   ensureTraceMode(state.traceMode);
+  if (state.status !== 'ACTIVE' && state.status !== 'WAITING' && state.status !== 'COMPLETE' && state.status !== 'FAIL') {
+    throw new XRuntimeError('FLOW_STATE_INVALID', 'status must be ACTIVE, WAITING, COMPLETE, or FAIL', { status: state.status });
+  }
   ensureNonEmptyStringState(state.currentStepId, 'currentStepId');
   ensureNonEmptyStringState(state.currentStepType, 'currentStepType');
   ensureNonEmptyStringState(state.currentStepSubtype, 'currentStepSubtype');
@@ -178,16 +208,18 @@ function ensureStateMatchesFlow(flow: PreparedFlowInternal, state: ProcessState)
     throw new XRuntimeError('FLOW_STATE_INVALID', 'meta must be a JSON-safe object');
   }
 
-  if (state.id !== flow.id) {
-    throw new XRuntimeError('FLOW_FLOW_MISMATCH', 'state.id does not belong to preparedFlow.id', {
-      stateId: state.id,
+  const stateFlowId = state.flowId;
+  const stateFlowVersion = state.flowVersion;
+  if (stateFlowId !== flow.id) {
+    throw new XRuntimeError('FLOW_FLOW_MISMATCH', 'state.flowId does not belong to preparedFlow.id', {
+      stateFlowId,
       flowId: flow.id,
     });
   }
 
-  if (state.version !== flow.version) {
-    throw new XRuntimeError('FLOW_FLOW_MISMATCH', 'state.version does not match preparedFlow.version', {
-      stateVersion: state.version,
+  if (stateFlowVersion !== flow.version) {
+    throw new XRuntimeError('FLOW_FLOW_MISMATCH', 'state.flowVersion does not match preparedFlow.version', {
+      stateFlowVersion,
       flowVersion: flow.version,
     });
   }
@@ -278,7 +310,7 @@ function buildTransitionTarget(flow: PreparedFlowInternal, stepId: string): Tran
   return {
     stepId: step.id,
     type: 'PROCESS',
-    subtype: step.subtype as ExecutableProcessSubtype,
+    subtype: 'DATA' as const,
   };
 }
 
@@ -291,43 +323,58 @@ function normalizeRoutingValue(value: unknown, field: string): string {
 
 function resolveSelectedNextStepId(flow: PreparedFlowInternal, step: PreparedControlStep, state: ProcessState): string {
   if (step.subtype === 'ROUTE') {
-    const routeValue = getPath(state, step.factRef);
+    const routeRef = (step as unknown as Record<string, unknown>)['ref'] as string;
+    const routeValue = getPath(state, routeRef);
     if (!routeValue.found) {
-      throw new XRuntimeError('FLOW_PATH_NOT_RESOLVED', `Path is not resolved: ${step.factRef}`, {
-        path: step.factRef,
+      // Missing ref is a broken dataflow contract — not a business "no match"
+      throw new XRuntimeError('FLOW_ROUTE_REF_NOT_RESOLVED', `CONTROL/ROUTE ref not found in state: ${routeRef}`, {
+        ref: routeRef, stepId: step.id,
+      });
+    }
+    const val = routeValue.value;
+    if (val !== null && typeof val === 'object') {
+      throw new XRuntimeError('FLOW_ROUTE_REF_NOT_SCALAR', `CONTROL/ROUTE ref must resolve to a scalar value, got object/array: ${routeRef}`, {
+        ref: routeRef,
         stepId: step.id,
       });
     }
-    const caseKey = normalizeRoutingValue(routeValue.value, `factRef(${step.factRef})`);
+    const caseKey = normalizeRoutingValue(val, `ref(${routeRef})`);
     return step.cases[caseKey] ?? step.defaultNextStepId;
   }
 
-  if (step.subtype === 'SWITCH') {
-    const decisions = isRecord(state.context.decisions) ? state.context.decisions : undefined;
-    const decisionRecord = decisions?.[step.decisionSetId];
-    if (!isRecord(decisionRecord)) {
-      throw new XRuntimeError('FLOW_DECISION_NOT_RESOLVED', 'Decision set is not resolved in context.decisions', {
-        decisionSetId: step.decisionSetId,
-        stepId: step.id,
-      });
-    }
-    const outcome = decisionRecord.outcome;
-    if (!isNonEmptyString(outcome)) {
-      throw new XRuntimeError('FLOW_DECISION_NOT_RESOLVED', 'Decision outcome is missing', {
-        decisionSetId: step.decisionSetId,
-        stepId: step.id,
-      });
-    }
-    return step.cases[outcome] ?? step.defaultNextStepId;
-  }
-
-  // unreachable — CONTROL only has ROUTE and SWITCH subtypes
+  // unreachable in Flow 5 — CONTROL only has ROUTE
   throw new XRuntimeError('FLOW_REDUCE_INVALID_TYPE', 'Unknown CONTROL subtype', {});
 }
 
 function assignOutput(state: ProcessState, outputRef: string, output: unknown): void {
   ensureJsonSafeValue(output, outputRef);
   const patchedState = setPath(state as unknown as Record<string, unknown>, outputRef, output);
+  state.context = patchedState.context as ProcessContext;
+}
+
+
+function assertValidDataflowWrite(write: unknown, stepId: string): asserts write is { ref: string; value: unknown; itemId: string } {
+  if (!isRecord(write)) {
+    throw new XRuntimeError('FLOW_DATA_WRITE_INVALID', 'DataflowOutput write must be an object', { stepId });
+  }
+  const w = write as Record<string, unknown>;
+  if (!isNonEmptyString(w['ref'])) {
+    throw new XRuntimeError('FLOW_DATA_WRITE_INVALID', 'DataflowOutput write.ref must be a non-empty string', { stepId });
+  }
+  if (!isNonEmptyString(w['itemId'])) {
+    throw new XRuntimeError('FLOW_DATA_WRITE_INVALID', 'DataflowOutput write.itemId must be a non-empty string', { stepId });
+  }
+  const ref = w['ref'] as string;
+  if (!ref.startsWith('$.context.data.')) {
+    throw new XRuntimeError('FLOW_DATA_WRITE_FORBIDDEN_PATH', `DataflowOutput write.ref must start with "$.context.data.": ${ref}`, { stepId, ref });
+  }
+  if (!isJsonSafe(w['value'])) {
+    throw new XRuntimeError('FLOW_DATA_WRITE_NOT_JSON_SAFE', `DataflowOutput write.value must be JSON-safe for ref: ${ref}`, { stepId, ref });
+  }
+}
+
+function applyDataflowWrite(state: ProcessState, write: { ref: string; value: unknown; itemId: string }): void {
+  const patchedState = setPath(state as unknown as Record<string, unknown>, write.ref, write.value);
   state.context = patchedState.context as ProcessContext;
 }
 
@@ -444,6 +491,9 @@ function chooseFailureTarget(
 }
 
 function normalizeExternalResult(result: EffectResult | WaitResult, field: 'effectResult' | 'waitResult') {
+  if (!isRecord(result)) {
+    throw new XRuntimeError('FLOW_RUNTIME_INPUT_INVALID', `${field} must be a JSON-safe object`, { field });
+  }
   const requestId = ensureNonEmptyStringState(result.requestId, `${field}.requestId`, 'FLOW_REQUEST_ID_MISSING');
 
   if (result.result !== undefined && result.result !== null) ensureJsonSafeValue(result.result, `${field}.result`);
@@ -471,15 +521,21 @@ function reasonFromError(error: unknown): string | null {
 }
 
 export function createProcessState(params: CreateProcessStateParams): ProcessState {
-  const flow = asPreparedFlowInternal(params.flow);
+  if (params == null || typeof params !== 'object') {
+    throw new XRuntimeError('FLOW_RUNTIME_INPUT_INVALID', 'createProcessState: params must be a non-null object', { received: typeof params });
+  }
+  const flow = ensurePreparedFlowInput(params.flow, 'createProcessState');
+  if (typeof params.processId !== 'string' || params.processId.trim() === '') {
+    throw new XRuntimeError('FLOW_RUNTIME_INPUT_INVALID', 'createProcessState: params.processId must be a non-empty string', {});
+  }
   const entryStep = ensurePreparedStep(flow, flow.entryStepId);
   const createdAt = now();
   const traceMode = params.trace ?? 'off';
 
   const state: ProcessState = {
     processId: ensureNonEmptyStringState(params.processId, 'processId'),
-    id: ensureNonEmptyStringState(flow.id, 'flow.id'),
-    version: ensureNonEmptyStringState(flow.version, 'flow.version'),
+    flowId: ensureNonEmptyStringState(flow.id, 'flow.id'),
+    flowVersion: ensureNonEmptyStringState(flow.version, 'flow.version'),
     traceMode,
     status: 'ACTIVE',
     currentStepId: entryStep.id,
@@ -534,21 +590,21 @@ export function createProcessState(params: CreateProcessStateParams): ProcessSta
 }
 
 export function plan(flow: PreparedFlow, state: ProcessState): NormalizedStep {
-  const preparedFlow = asPreparedFlowInternal(flow);
+  const preparedFlow = ensurePreparedFlowInput(flow, 'plan');
+  ensureProcessStateInput(state, 'plan');
   const currentStep = ensureRuntimeAllowed(preparedFlow, state);
 
   if (currentStep.type === 'PROCESS') {
-    const executableStep = currentStep as PreparedExecutableProcessStep;
-    const next = buildTransitionTarget(preparedFlow, executableStep.nextStepId);
-    const normalized = {
-      id: executableStep.id,
+    const dataStep = currentStep as PreparedDataProcessStep;
+    const next = buildTransitionTarget(preparedFlow, dataStep.nextStepId);
+    const normalized: NormalizedDataProcessStepInternal = {
+      id: dataStep.id,
       type: 'PROCESS',
-      subtype: executableStep.subtype,
-      artefactId: executableStep.artefactId,
-      input: resolveInput(state, executableStep.contract.input.ref),
-      outputRef: executableStep.contract.output.ref,
+      subtype: 'DATA',
+      artefactId: dataStep.artefactId,
+      nextStepId: dataStep.nextStepId,
       next,
-    } satisfies NormalizedExecutableProcessStepInternal;
+    };
     return normalized;
   }
 
@@ -556,25 +612,15 @@ export function plan(flow: PreparedFlow, state: ProcessState): NormalizedStep {
     const selectedNextStepId = resolveSelectedNextStepId(preparedFlow, currentStep as PreparedControlStep, state);
     const next = buildTransitionTarget(preparedFlow, selectedNextStepId);
 
-    if (currentStep.subtype === 'ROUTE') {
-      const normalized = {
-        id: currentStep.id,
-        type: 'CONTROL',
-        subtype: 'ROUTE',
-        selectedNextStepId,
-        next,
-      } satisfies NormalizedRouteStepInternal;
-      return normalized;
-    }
-
-    const normalized = {
+    const normalized: NormalizedRouteStepInternal = {
       id: currentStep.id,
       type: 'CONTROL',
-      subtype: 'SWITCH',
+      subtype: 'ROUTE',
       selectedNextStepId,
       next,
-    } satisfies NormalizedSwitchStepInternal;
+    };
     return normalized;
+
   }
 
   if (currentStep.type === 'EFFECT') {
@@ -630,12 +676,41 @@ export function plan(flow: PreparedFlow, state: ProcessState): NormalizedStep {
   } satisfies NormalizedTerminalStep;
 }
 
-export function reduce(step: NormalizedProcessStep | NormalizedControlStep, currentState: ProcessState, output: unknown): ProcessState {
+export function reduce(step: NormalizedProcessStep | NormalizedControlStep | NormalizedTerminalStep, currentState: ProcessState, output: unknown): ProcessState {
+  if (step == null || typeof step !== 'object' || typeof (step as any).id !== 'string') {
+    throw new XRuntimeError('FLOW_RUNTIME_INPUT_INVALID', 'reduce: step must be a normalized step object from plan()', {});
+  }
+  if (currentState == null || typeof currentState !== 'object') {
+    throw new XRuntimeError('FLOW_RUNTIME_INPUT_INVALID', 'reduce: state must be a ProcessState object', {});
+  }
+  // TERMINAL: resolves static result or resultRef and finalizes state.
+  if (step.type === 'TERMINAL') {
+    if (currentState.currentStepId !== step.id) {
+      throw new XRuntimeError('FLOW_STEP_MISMATCH', 'reduce(TERMINAL) step does not match current state', {
+        stepId: step.id, currentStepId: currentState.currentStepId,
+      });
+    }
+    if (currentState.currentStepType !== 'TERMINAL' || currentState.currentStepSubtype !== step.subtype) {
+      throw new XRuntimeError('FLOW_REDUCE_INVALID_TYPE', 'Current step must be TERMINAL', {
+        stepId: step.id, currentStepType: currentState.currentStepType, currentStepSubtype: currentState.currentStepSubtype,
+      });
+    }
+    if (currentState.status === 'COMPLETE' || currentState.status === 'FAIL') {
+      return currentState;
+    }
+    const terminalStep = step as NormalizedTerminalStep;
+    const target: TransitionTarget = terminalStep.resultRef
+      ? { stepId: step.id, type: 'TERMINAL', subtype: step.subtype, resultRef: terminalStep.resultRef }
+      : { stepId: step.id, type: 'TERMINAL', subtype: step.subtype, result: structuredClone(terminalStep.result!) };
+    return followTransition(cloneState(currentState), target, now());
+  }
+
   if (currentState.status === 'COMPLETE' || currentState.status === 'FAIL') {
-    throw new XRuntimeError('FLOW_TERMINAL_MISUSED', 'reduce(...) cannot be called on terminal process', {
+    throw new XRuntimeError('FLOW_TERMINAL_MISUSED', 'reduce(...) cannot be called on an already-terminal process', {
       status: currentState.status,
     });
   }
+
   const expectedStepType = (step.type === 'CONTROL' ? 'CONTROL' : 'PROCESS') as PreparedStep['type'];
   ensureCurrentStep(currentState, step.id, expectedStepType, 'FLOW_REDUCE_INVALID_TYPE');
   if (currentState.currentStepSubtype !== step.subtype) {
@@ -647,9 +722,9 @@ export function reduce(step: NormalizedProcessStep | NormalizedControlStep, curr
   }
 
   const internalStep = step as
-    | NormalizedExecutableProcessStepInternal
+    | NormalizedDataProcessStepInternal
     | NormalizedRouteStepInternal
-    | NormalizedSwitchStepInternal;
+    ;
 
   if (!('next' in internalStep) || !isRecord(internalStep.next) || !isNonEmptyString(internalStep.next.stepId)) {
     throw new XRuntimeError('FLOW_STATE_INVALID', 'reduce(...) requires a normalized PROCESS step returned by plan(...)', {
@@ -660,14 +735,24 @@ export function reduce(step: NormalizedProcessStep | NormalizedControlStep, curr
   const nextState = cloneState(currentState);
   const at = now();
 
-  if (step.subtype === 'RULES' || step.subtype === 'MAPPINGS' || step.subtype === 'DECISIONS') {
-    const executableInternal = internalStep as NormalizedExecutableProcessStepInternal;
-    if (!isNonEmptyString(executableInternal.outputRef)) {
-      throw new XRuntimeError('FLOW_STATE_INVALID', 'Executable PROCESS step is missing contract.output.ref', {
+  if (step.type === 'PROCESS' && step.subtype === 'DATA') {
+    // output must be DataflowOutput { writes: DataflowWrite[] }
+    if (!isRecord(output) || !Array.isArray((output as Record<string,unknown>)['writes'])) {
+      throw new XRuntimeError('FLOW_DATA_OUTPUT_INVALID', 'reduce(PROCESS/DATA) requires DataflowOutput with writes array', {
         stepId: step.id,
       });
     }
-    assignOutput(nextState, executableInternal.outputRef, output);
+    const dataOutput = output as unknown as DataflowOutput;
+    // Validate trace if present — must be JSON-safe array (transport-safe contract)
+    if (dataOutput.trace !== undefined) {
+      if (!Array.isArray(dataOutput.trace) || !isJsonSafe(dataOutput.trace)) {
+        throw new XRuntimeError('FLOW_DATA_OUTPUT_INVALID', 'DataflowOutput.trace must be a JSON-safe array or absent', { stepId: step.id });
+      }
+    }
+    for (const write of dataOutput.writes) {
+      assertValidDataflowWrite(write, step.id);
+      applyDataflowWrite(nextState, write);
+    }
   }
 
   updateStepTrace(nextState, step.id, {
@@ -690,9 +775,11 @@ export function reduce(step: NormalizedProcessStep | NormalizedControlStep, curr
 }
 
 export function apply(flow: PreparedFlow, currentState: ProcessState, stepId: string, effectResult: EffectResult): ProcessState {
-  const preparedFlow = asPreparedFlowInternal(flow);
+  const preparedFlow = ensurePreparedFlowInput(flow, 'apply');
+  ensureProcessStateInput(currentState, 'apply');
+  const normalizedStepId = ensureStepIdInput(stepId, 'apply');
   const currentStep = ensureRuntimeAllowed(preparedFlow, currentState);
-  ensureCurrentStep(currentState, stepId, 'EFFECT', 'FLOW_APPLY_INVALID_TYPE');
+  ensureCurrentStep(currentState, normalizedStepId, 'EFFECT', 'FLOW_APPLY_INVALID_TYPE');
   if (currentStep.type !== 'EFFECT') {
     throw new XRuntimeError('FLOW_APPLY_INVALID_TYPE', 'apply(...) can be used only for EFFECT step', { stepId });
   }
@@ -733,9 +820,11 @@ export function apply(flow: PreparedFlow, currentState: ProcessState, stepId: st
 }
 
 export function resume(flow: PreparedFlow, currentState: ProcessState, stepId: string, waitResult: WaitResult): ProcessState {
-  const preparedFlow = asPreparedFlowInternal(flow);
+  const preparedFlow = ensurePreparedFlowInput(flow, 'resume');
+  ensureProcessStateInput(currentState, 'resume');
+  const normalizedStepId = ensureStepIdInput(stepId, 'resume');
   const currentStep = ensureRuntimeAllowed(preparedFlow, currentState);
-  ensureCurrentStep(currentState, stepId, 'WAIT', 'FLOW_RESUME_INVALID_TYPE');
+  ensureCurrentStep(currentState, normalizedStepId, 'WAIT', 'FLOW_RESUME_INVALID_TYPE');
   if (currentStep.type !== 'WAIT') {
     throw new XRuntimeError('FLOW_RESUME_INVALID_TYPE', 'resume(...) can be used only for WAIT step', { stepId });
   }

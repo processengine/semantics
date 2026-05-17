@@ -1,11 +1,11 @@
-import type { InputRef, InputRefObject } from '../dsl/types.js';
+
 import { XRuntimeError } from '../errors/index.js';
 import { isNonEmptyString, isRecord } from './guards.js';
 
 export type PathSegment = string | number;
 
 const IDENTIFIER_RE = /^[A-Za-z_][A-Za-z0-9_]*$/u;
-const WRITABLE_ZONE_NAMES = new Set(['checks', 'facts', 'decisions']);
+const WRITABLE_ZONE_NAMES = new Set(['data']);
 
 function readQuotedSegment(path: string, index: number): { value: string; nextIndex: number } | null {
   const quote = path[index];
@@ -171,39 +171,16 @@ export function setPath<T extends Record<string, unknown>>(target: T, path: stri
   return clone as T;
 }
 
-function resolveInputObject(target: unknown, inputRef: InputRefObject): Record<string, unknown> {
-  const resolved: Record<string, unknown> = {};
-
-  for (const [key, nested] of Object.entries(inputRef)) {
-    if (typeof nested === 'string') {
-      const pathResult = getPath(target, nested);
-      if (!pathResult.found) {
-        throw new XRuntimeError('FLOW_PATH_NOT_RESOLVED', `Path is not resolved: ${nested}`, { path: nested });
-      }
-      resolved[key] = pathResult.value;
-      continue;
-    }
-
-    resolved[key] = resolveInputObject(target, nested);
+export function resolveInput(target: unknown, inputRef: string): unknown {
+  const pathResult = getPath(target, inputRef);
+  if (!pathResult.found) {
+    throw new XRuntimeError('FLOW_PATH_NOT_RESOLVED', `Path is not resolved: ${inputRef}`, { path: inputRef });
   }
-
-  return resolved;
+  return pathResult.value;
 }
 
-export function resolveInput(target: unknown, inputRef: InputRef): unknown {
-  if (typeof inputRef === 'string') {
-    const pathResult = getPath(target, inputRef);
-    if (!pathResult.found) {
-      throw new XRuntimeError('FLOW_PATH_NOT_RESOLVED', `Path is not resolved: ${inputRef}`, { path: inputRef });
-    }
-    return pathResult.value;
-  }
-
-  return resolveInputObject(target, inputRef);
-}
-
-export function isPathObject(value: unknown): value is InputRefObject {
-  return isRecord(value);
+export function isPathObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 export function isIdentifierSegment(segment: string): boolean {

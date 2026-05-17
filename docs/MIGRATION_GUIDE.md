@@ -1,102 +1,32 @@
-# Migration Guide
+# Migration Guide — Flow 3 to Flow 5
 
-## From pre-canon `2.0.x` to canon-aligned `2.1.0`
+Flow 5 is a major model rewrite. There is no compatibility mode.
 
-This release is a contract realignment, not a patch-level cosmetic update.
+## Step taxonomy
 
-## Required DSL changes
-
-- change `steps` from array to object map
-- ensure every step has explicit `subtype`
-- replace subtype-less `PROCESS` with one of:
-  - `RULES`
-  - `MAPPINGS`
-  - `DECISIONS`
-  - `ROUTE`
-  - `SWITCH`
-- change `WAIT` to `subtype: "MESSAGE"`
-- change EFFECT `artefactId` to `operationId`
-
-## Required runtime changes
-
-- change active status from `RUNNING` to `ACTIVE`
-- change state flow binding field from `flowId` to `id`
-- remove `flowVersion` from public `ProcessState`
-- remove `correlationKey` from `effectResult`
-- treat missing path resolution as runtime error
-- treat mixed non-null `result + error` as runtime error
-
-## Public API changes
-
-Stable root export:
-- `validateFlow`
-- `prepareFlow`
-- `plan`
-- `reduce`
-- `apply`
-- `resume`
-
-Added to root public export:
-- `createProcessState` — the only canonical way to create initial `ProcessState`
-
-## Validation result changes
-
-Old shape:
-
-```ts
-{ ok, diagnostics }
+```text
+PROCESS/RULES      -> PROCESS/DATA with RULES item inside dataflow artifact
+PROCESS/MAPPINGS   -> PROCESS/DATA with MAPPINGS item inside dataflow artifact
+PROCESS/DECISIONS  -> PROCESS/DATA with DECISIONS item inside dataflow artifact
+CONTROL/SWITCH     -> CONTROL/ROUTE reading $.context.data.decisions.*.outcome
+CONTROL/ROUTE.factRef -> CONTROL/ROUTE.ref
 ```
 
-New shape:
+## State shape
 
-```ts
-{ isValid, errors, warnings }
+```text
+state.id                 -> state.flowId
+state.version            -> state.flowVersion
+context.checks.*         -> context.data.checks.*
+context.facts.*          -> context.data.facts.*
+context.decisions.*      -> context.data.decisions.*
+terminal results         -> context.data.results.*
 ```
 
-## Error changes
+## Input refs
 
-Old families:
-- `FlowCompileError`
-- `FlowRuntimeError`
+Object input refs are removed. Composite input preparation must be modeled as an explicit PROCESS/DATA payload preparation step.
 
-New families:
-- `XCompileError`
-- `XRuntimeError`
+## Terminal
 
-## Runtime shape changes
-
-Old EFFECT:
-
-```json
-{
-  "type": "EFFECT",
-  "artefactId": "legacy.effect"
-}
-```
-
-New EFFECT:
-
-```json
-{
-  "type": "EFFECT",
-  "subtype": "COMMAND",
-  "operationId": "remote.submit"
-}
-```
-
-Old WAIT:
-
-```json
-{
-  "type": "WAIT"
-}
-```
-
-New WAIT:
-
-```json
-{
-  "type": "WAIT",
-  "subtype": "MESSAGE"
-}
-```
+`reduce(TERMINAL, state, null)` is the canonical terminal finalization call. Transitions into terminal steps may also be finalized by `reduce` of the previous step.

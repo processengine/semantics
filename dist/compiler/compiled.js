@@ -5,7 +5,7 @@ export function normalizeSteps(steps) {
     }
     return normalized;
 }
-export function createPreparedFlow(flow) {
+export function createPreparedFlow(flow, _options) {
     const prepared = {
         id: flow.id,
         version: flow.version,

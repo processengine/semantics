@@ -1,37 +1,20 @@
-# `@processengine/semantics`
+# @processengine/semantics
 
-**Canonical implementation of subject-level process semantics for the ProcessEngine family.**
+Flow 5 process semantics for ProcessEngine.
 
-`semantics` interprets [Flow3](#flow3-dsl) — the declarative process description language — and provides a transport-safe, orchestrator-agnostic runtime for process state transitions.
+Validates, prepares and executes flow definitions. Manages process state transitions according to the Flow 5 model.
 
----
-
-## Role in ProcessEngine
+## Flow 5 model
 
 ```
-Flow3 DSL artifact
-       │
-       ▼
- ┌─────────────┐
- │  semantics  │  ← this library
- └─────────────┘
-       │   plan / reduce / apply / resume
-       ▼
- ┌──────────────┐
- │ orchestrator │  lifecycle: execute modules, persist state,
- └──────────────┘  dispatch effects, schedule, correlate
-       │
-       ▼
-   runtime        infrastructure: Kafka, HTTP, DB, timers
+PROCESS/DATA  — synchronous data processing via dataflow artifact
+CONTROL/ROUTE — routing by any scalar value from state
+EFFECT        — external async call (COMMAND, CALL, SUBFLOW)
+WAIT/MESSAGE  — waiting for async response
+TERMINAL      — COMPLETE or FAIL
 ```
 
-**`semantics` owns:** Flow3 interpretation, compile/prepare validation, canonical process state, `plan(...)`, `reduce(...)`, `apply(...)`, `resume(...)`, internal resolution of `CONTROL` steps.
-
-**`semantics` does not own:** runtime module execution, persistence, transport, retry, scheduling, external side-effect dispatch, `requestId` generation.
-
-> API method names (`validateFlow`, `prepareFlow`, etc.) are preserved for compatibility. The architectural role these methods implement is the `semantics` layer.
-
----
+**Removed from Flow 5:** `PROCESS/RULES`, `PROCESS/MAPPINGS`, `PROCESS/DECISIONS`, `CONTROL/SWITCH`.
 
 ## Install
 
@@ -39,268 +22,93 @@ Flow3 DSL artifact
 npm install @processengine/semantics
 ```
 
----
-
 ## Quick start
 
-```ts
-import {
-  validateFlow,
-  prepareFlow,
-  createProcessState,
-  plan,
-  reduce,
-  apply,
-  resume,
-} from '@processengine/semantics';
+```js
+import { validateFlow, prepareFlow, createProcessState, plan, reduce } from '@processengine/semantics';
 
-// 1. Validate and prepare the Flow3 artifact
-const validation = validateFlow(flow);
-if (!validation.isValid) throw new Error(formatValidationIssues(validation.errors));
-const preparedFlow = prepareFlow(flow);
-
-// 2. Create a process instance
-let state = createProcessState({ flow: preparedFlow, processId: 'order-001', input: { ... } });
-
-// 3. Run the execution loop (orchestrator responsibility)
-while (state.status === 'ACTIVE') {
-  const step = plan(preparedFlow, state);
-
-  if (step.type === 'PROCESS') {
-    // orchestrator executes the module and gets output
-    const output = await executeModule(step.artefactId, step.input);
-    state = reduce(step, state, output);
-  }
-
-  if (step.type === 'CONTROL') {
-    // semantics already resolved the transition — just commit
-    state = reduce(step, state, null);
-  }
-
-  if (step.type === 'EFFECT') {
-    // orchestrator dispatches external effect and registers result
-    const requestId = generateRequestId();
-    await dispatchEffect(step.operationId, step.input, requestId);
-    state = apply(preparedFlow, state, step.id, { requestId, result: { status: 'ACCEPTED' }, error: null, errorCode: null });
-    // process is now WAITING — schedule for later
-    break;
-  }
-
-  if (step.type === 'WAIT') {
-    // external result arrived — resume
-    state = resume(preparedFlow, state, step.id, { requestId, result: externalResult, error: null, errorCode: null });
-  }
-
-  if (step.type === 'TERMINAL') break;
-}
-```
-
----
-
-## Flow3 DSL
-
-Flow3 is the canonical process description language interpreted by `semantics`.
-
-A Flow3 artifact is a JSON object with `id`, `version`, `entryStepId`, and `steps`. The `steps` is an object map (`Record<StepId, StepDefinition>`) from step id to step definition.
-
-### Step types
-
-| `type`       | `subtype`                    | Owner              | Description |
-|-------------|-----------------------------|--------------------|-------------|
-| `PROCESS`   | `RULES` `MAPPINGS` `DECISIONS` | orchestrator       | Executable steps — call a registered module |
-| `CONTROL`   | `ROUTE` `SWITCH`             | semantics (internal) | Routing — resolved by `plan()`, never reach `executeStep` |
-| `EFFECT`    | `COMMAND` `CALL` `SUBFLOW`   | orchestrator       | External side effects |
-| `WAIT`      | `MESSAGE` (`WAIT/MESSAGE`)   | orchestrator       | Suspend until external result arrives |
-| `TERMINAL`  | `COMPLETE` `FAIL`            | semantics          | End the process. Supports static `result` or dynamic `resultRef`. |
-
-### Minimal Flow3 example
-
-```json
-{
-  "id": "order.validation",
-  "version": "2026-04-01",
-  "entryStepId": "validate_input",
-  "steps": {
-    "validate_input": {
-      "id": "validate_input",
-      "type": "PROCESS",
-      "subtype": "RULES",
-      "artefactId": "rules.order.validate",
-      "contract": {
-        "input":  { "ref": "$.context.input" },
-        "output": { "ref": "$.context.checks.validation" }
-      },
-      "nextStepId": "route_validation"
+const flowDef = {
+  id: 'flow.example',
+  version: '1.0.0',
+  title: 'Example flow',
+  description: 'Minimal Flow 5 process.',
+  entryStepId: 'evaluate',
+  steps: {
+    evaluate: {
+      id: 'evaluate', type: 'PROCESS', subtype: 'DATA',
+      title: 'Evaluate', description: 'Runs a dataflow artifact.',
+      artefactId: 'dataflow.example.evaluate',
+      nextStepId: 'finish',
     },
-    "route_validation": {
-      "id": "route_validation",
-      "type": "CONTROL",
-      "subtype": "ROUTE",
-      "factRef": "$.context.checks.validation.passed",
-      "cases": { "true": "finish_ok", "false": "finish_fail" },
-      "defaultNextStepId": "finish_fail"
+    finish: {
+      id: 'finish', type: 'TERMINAL', subtype: 'COMPLETE',
+      title: 'Finish', description: 'Process complete.',
+      result: { status: 'COMPLETE', outcome: 'DONE' },
     },
-    "finish_ok": {
-      "id": "finish_ok",
-      "type": "TERMINAL",
-      "subtype": "COMPLETE",
-      "result": { "status": "COMPLETE", "outcome": "ORDER_VALID" }
-    },
-    "finish_fail": {
-      "id": "finish_fail",
-      "type": "TERMINAL",
-      "subtype": "FAIL",
-      "result": { "status": "FAIL", "outcome": "ORDER_INVALID" }
-
-// Or use resultRef for dynamic result (e.g. with per-field validation errors):
-//   "type": "TERMINAL",
-//   "subtype": "FAIL",
-//   "resultRef": "$.context.facts.validationRejectResult"
-// semantics resolves the path value and sets it as state.result
-    }
-  }
-}
-```
-
-### Executable PROCESS step — `contract` binding
-
-Executable `PROCESS` steps (RULES, MAPPINGS, DECISIONS) declare input/output bindings via `contract`:
-
-```json
-{
-  "type": "PROCESS",
-  "subtype": "MAPPINGS",
-  "artefactId": "mappings.enrich",
-  "contract": {
-    "input":  { "ref": "$.context.checks.validation" },
-    "output": { "ref": "$.context.facts.enriched" }
   },
-  "nextStepId": "next_step"
-}
+};
+
+// 1. Validate
+const v = validateFlow(flowDef);
+if (!v.ok) throw new Error(JSON.stringify(v.issues));
+
+// 2. Prepare once
+const flow = prepareFlow(flowDef);
+
+// 3. Create process state
+const state = createProcessState({ flow, processId: 'proc-001', input: { x: 1 } });
+// state.context.data.{facts,decisions,checks,payloads,results} are all available
+
+// 4. Orchestrator loop
+const dataStep = plan(flow, state);
+// dataStep.artefactId → pass to @processengine/dataflows
+// dataStep contains NO input — orchestrator does not know about dataflow internals
+
+const nextState = reduce(dataStep, state, {
+  // DataflowOutput from @processengine/dataflows
+  writes: [
+    { ref: '$.context.data.decisions.x', value: { outcome: 'DONE' }, itemId: 'decide' },
+  ],
+});
+// nextState.currentStepId === 'finish', status === 'COMPLETE'
 ```
 
-- `contract.input.ref` — path resolved by `semantics` from current state; becomes `step.input` in the normalized step
-- `contract.output.ref` — path where `reduce(...)` writes module output
-
-### CONTROL steps
-
-`CONTROL/ROUTE` and `CONTROL/SWITCH` are resolved entirely inside `semantics`. The orchestrator never calls `executeStep` for them — it calls `reduce(step, state, null)` to commit the already-resolved transition.
-
-```json
-{
-  "type": "CONTROL",
-  "subtype": "SWITCH",
-  "decisionSetId": "route_decision",
-  "cases": {
-    "APPROVE": "step_approve",
-    "REJECT":  "step_reject"
-  },
-  "defaultNextStepId": "step_manual"
-}
-```
-
-### EFFECT steps
-
-```json
-{
-  "type": "EFFECT",
-  "subtype": "COMMAND",
-  "operationId": "abs.create_beneficiary",
-  "inputRef": "$.context.facts.abs_request",
-  "nextStepId": "wait_abs_response",
-  "onErrorStepId": "finish_fail"
-}
-```
-
-`inputRef` on `EFFECT` steps is the canonical binding field (not `contract`).
-
----
-
-## Public API
-
-```ts
-validateFlow(flow, options?)  -> ValidationResult
-prepareFlow(flow, options?)   -> PreparedFlow
-
-createProcessState(params)                         -> ProcessState
-plan(preparedFlow, state)                          -> NormalizedStep
-reduce(step, state, output)                        -> ProcessState
-apply(preparedFlow, state, stepId, effectResult)   -> ProcessState
-resume(preparedFlow, state, stepId, waitResult)    -> ProcessState
-
-formatValidationIssues(issues) -> string
-formatRuntimeError(error)      -> string
-```
-
-### `plan(preparedFlow, state) -> NormalizedStep`
-
-Deterministically materializes the current step from `preparedFlow` and `state`. Does not mutate state.
-
-Performs three operations:
-1. **Normalization** — projects step definition into a transport-safe packet
-2. **Binding resolution** — resolves `contract.input.ref` (PROCESS) or `inputRef` (EFFECT); materializes `requestId` and `operationId` for WAIT steps
-3. **Control resolution** — for `CONTROL` steps evaluates branching and carries `selectedNextStepId` in the result
-
-### `reduce(step, state, output) -> ProcessState`
-
-Commits a step transition:
-- **PROCESS**: writes `output` to `contract.output.ref` and advances to `nextStepId`
-- **CONTROL**: commits the already-resolved `selectedNextStepId`; `output` must be `null`
-
-### Step types from `plan(...)`
+## Orchestrator contract
 
 ```
-step.type === 'PROCESS'  → step.artefactId, step.subtype, step.input
-step.type === 'CONTROL'  → step.subtype, step.selectedNextStepId
-step.type === 'EFFECT'   → step.operationId, step.subtype, step.input
-step.type === 'WAIT'     → step.sourceStepId, step.operationId, step.requestId
-step.type === 'TERMINAL' → step.subtype, step.result (static) or step.resultRef (dynamic)
+orchestrator:
+  step = plan(flow, state)           // get current step description
+  output = executeStep(step, state)  // call appropriate runtime (dataflows, etc.)
+  state = reduce(step, state, output)// apply output, advance to next step
+  persist(state)
 ```
 
----
+## ProcessContext
 
-## Error handling
-
-```ts
-import { XCompileError, XRuntimeError, formatValidationIssues, formatRuntimeError } from '@processengine/semantics';
-
-try {
-  const state2 = reduce(step, state, output);
-} catch (err) {
-  if (err instanceof XRuntimeError) {
-    console.error(err.code, err.message); // FLOW_REDUCE_INVALID_TYPE, etc.
-  }
-}
+```
+context.input             — process input
+context.data.payloads.*   — intermediate payloads
+context.data.facts.*      — decision-ready facts
+context.data.decisions.*  — decision outcomes
+context.data.checks.*     — rule check results
+context.data.results.*    — terminal results (read by TERMINAL.resultRef)
+context.effects.*         — effect responses
 ```
 
-All runtime errors carry a stable machine-readable `code` (e.g. `FLOW_STEP_MISMATCH`, `FLOW_PATH_NOT_RESOLVED`).
+## CONTROL/ROUTE
 
----
+ROUTE reads a scalar from state by `ref` path:
 
-## ProcessState shape
+- String/number/boolean/null: matched against `cases` keys
+- Missing ref: **runtime error** `FLOW_ROUTE_REF_NOT_RESOLVED` (missing ref is a broken dataflow contract, not a business "no match")
+- Object/array: **runtime error** `FLOW_ROUTE_REF_NOT_SCALAR`
+- No matching case: `defaultNextStepId`
 
-```ts
-interface ProcessState {
-  id: string;          // flow id
-  version: string;     // flow version
-  processId: string;
-  status: 'ACTIVE' | 'WAITING' | 'COMPLETE' | 'FAIL';  // ACTIVE | WAITING | COMPLETE | FAIL
-  traceMode: 'off' | 'basic' | 'verbose';
-  currentStepId: string;
-  currentStepType: 'PROCESS' | 'CONTROL' | 'EFFECT' | 'WAIT' | 'TERMINAL';
-  currentStepSubtype: string;
-  context: ProcessContext;
-  history: ProcessHistoryEntry[];
-  result: TerminalResult | null;
-  meta: JsonObject;
-}
-```
+## TERMINAL.resultRef
 
-`ProcessState` is a plain JSON-safe object. The orchestrator owns persistence and transport of state.
+Must point into `$.context.data.results.*`. Written there by a PROCESS/DATA step before the terminal transition.
 
----
+## See also
 
-## JSON Schema
-
-A JSON Schema for Flow3 artifacts is bundled at `dist/schema/flow3-1.0.0.schema.json`.
-
+- `@processengine/dataflows` — executes dataflow artifacts for PROCESS/DATA steps
+- `examples/` — canonical Flow 5 flow examples

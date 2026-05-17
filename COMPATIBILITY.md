@@ -1,51 +1,81 @@
-# Compatibility Policy
+# Compatibility Policy — `@processengine/semantics` v2
 
+## Current line
 
-## 1.1.0 — NormalizedTerminalStep shape change
+`@processengine/semantics` v2.0.0 is the Flow 5 canonical contract.
 
-`NormalizedTerminalStep.result` is now `TerminalResult | undefined` (was `TerminalResult`).
-When a TERMINAL step uses `resultRef`, `plan(...)` returns `{ type: "TERMINAL", resultRef: "..." }` without `result`.
+It is not compatible with Flow 3 source artifacts or Flow 3 process state shape.
+There is no compatibility mode, alias layer, or hidden Flow 3 fallback.
 
-**Impact:** consumers that access `step.result` directly on a `NormalizedTerminalStep` without checking `step.type === "TERMINAL"` first may get `undefined` if the step uses `resultRef`. 
+## Stable public areas
 
-**Migration:** check `step.resultRef` before `step.result`, or — since TERMINAL steps are not dispatched to the orchestrator — simply break the loop when `step.type === "TERMINAL"` as shown in the README example.
+The following are public compatibility surfaces for v2.x unless a future major version changes them:
 
----
+- Flow 5 source artifact shape documented in `SPEC.md` / `SPEC_RU.md`.
+- Flow 5 step taxonomy:
+  - `PROCESS/DATA`
+  - `CONTROL/ROUTE`
+  - `EFFECT/COMMAND`, `EFFECT/CALL`, `EFFECT/SUBFLOW`
+  - `WAIT/MESSAGE`
+  - `TERMINAL/COMPLETE`, `TERMINAL/FAIL`
+- Public lifecycle API:
+  - `validateFlow(source)`
+  - `prepareFlow(source)`
+  - `createProcessState(params)`
+  - `plan(preparedFlow, state)`
+  - `reduce(step, state, output?)`
+  - `apply(preparedFlow, state, stepId, effectResult)`
+  - `resume(preparedFlow, state, stepId, waitResult)`
+- Flow 5 `ProcessState` root fields and `context.data.*` namespaces.
+- Normalized step public shapes.
+- Dataflow write application contract for `PROCESS/DATA`.
+- `CONTROL/ROUTE.ref` scalar routing contract.
+- `TERMINAL.result` / `TERMINAL.resultRef` runtime contract.
+- Typed compile/runtime errors and stable machine-readable error codes.
+- Public JSON Schema export at `@processengine/semantics/schema`.
 
+## Intentionally internal / non-frozen areas
 
-## Current public contract
+The following must not be depended on by consumers:
 
-The current contract is the canonical `flows` model documented in:
-- [README.md](./README.md)
-- [SPEC.md](./SPEC.md)
-- [SPEC_RU.md](./SPEC_RU.md)
+- Internal indexes and caches inside `PreparedFlow` beyond documented public fields.
+- Internal ordering algorithms, as long as observable semantics remain unchanged.
+- Internal trace implementation details not described in the SPEC.
+- File layout inside `src/` or `dist/` except public `exports`.
 
-Stable public areas:
-- Flow DSL fields and meanings
-- `ProcessState` root fields and status values
-- Normalized step shapes
-- `effectResult` / `waitResult` contracts
-- Validation result shape
-- Typed error families and stable error codes
+Prepared artifacts are runtime-ready and immutable by public contract, but they are not guaranteed to be a stable persistence format. Persist source flow artifacts and prepare them for runtime.
 
-## Intentionally non-frozen areas
+## Flow 3 incompatibilities
 
-- Internal `PreparedFlow` structure
-- Internal indexes and caches
-- Internal implementation details used to support runtime transitions
+Flow 5 removes these Flow 3 public shapes:
 
-## Breaking changes in the canonical model
+```text
+PROCESS/RULES
+PROCESS/MAPPINGS
+PROCESS/DECISIONS
+CONTROL/SWITCH
+CONTROL/ROUTE.factRef
+context.checks
+context.facts
+context.decisions
+state.id / state.version as flow identity
+object inputRef assembly
+```
 
-The current contract is not backward-compatible with the older `2.0.x` pre-canon model.
+Use the migration guide in `docs/MIGRATION_GUIDE.md` to rewrite Flow 3 artifacts to Flow 5.
 
-Notable breaking changes:
-- `steps` is an object map, not an array
-- every step requires `subtype`
-- `WAIT` is `WAIT/MESSAGE`
-- active status is `ACTIVE`, not `RUNNING`
-- EFFECT uses `operationId`, not `artefactId`
-- runtime correlation contract uses `requestId` only
+## Node and module compatibility
 
-## Legacy policy
+- Supported Node.js: `>=20.19.0`.
+- Package type: native ESM (`"type": "module"`).
+- CJS `require()` is not a supported contract for v2.
 
-Legacy snapshot/runtime APIs, subtype-less `PROCESS`, array-form `steps`, `RUNNING`, `correlationKey`, and EFFECT `artefactId` are not part of the supported public contract.
+## JSON Schema compatibility
+
+The exported schema is part of the public contract. Every official example shipped in the npm package must validate against:
+
+```text
+@processengine/semantics/schema
+```
+
+The test and pack-smoke suites enforce this so schema, examples, docs, and runtime do not drift apart.

@@ -1,0 +1,50 @@
+{
+  "id": "flow.beneficiary.registration.minimal",
+  "version": "1.0.0",
+  "title": "Регистрация бенефициара — минимальный линейный процесс",
+  "description": "Пример Flow 5 процесса: DATA → ROUTE → TERMINAL.",
+  "entryStepId": "validate_application",
+  "steps": {
+    "validate_application": {
+      "id": "validate_application",
+      "type": "PROCESS",
+      "subtype": "DATA",
+      "title": "Валидировать заявку",
+      "description": "Запускает dataflow валидации заявки и принятия решения о допуске.",
+      "artefactId": "dataflow.beneficiary.validate_application",
+      "nextStepId": "route_validation_outcome"
+    },
+    "route_validation_outcome": {
+      "id": "route_validation_outcome",
+      "type": "CONTROL",
+      "subtype": "ROUTE",
+      "title": "Выбрать исход валидации",
+      "description": "Маршрутизирует по outcome решения из dataflow валидации.",
+      "ref": "$.context.data.decisions.validation.outcome",
+      "cases": {
+        "CONTINUE": "finish_accepted",
+        "REJECT_HARD": "finish_rejected"
+      },
+      "defaultNextStepId": "finish_rejected"
+    },
+    "finish_accepted": {
+      "id": "finish_accepted",
+      "type": "TERMINAL",
+      "subtype": "COMPLETE",
+      "title": "Завершить: заявка принята",
+      "description": "Фиксирует успешный результат регистрации.",
+      "resultRef": "$.context.data.results.registration"
+    },
+    "finish_rejected": {
+      "id": "finish_rejected",
+      "type": "TERMINAL",
+      "subtype": "FAIL",
+      "title": "Завершить: заявка отклонена",
+      "description": "Фиксирует отказной результат с блокирующими ошибками.",
+      "result": {
+        "status": "FAIL",
+        "outcome": "VALIDATION_REJECTED"
+      }
+    }
+  }
+}

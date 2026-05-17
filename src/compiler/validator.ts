@@ -1,18 +1,12 @@
 import { createPreparedFlow } from './compiled.js';
 import type { PrepareFlowOptions, ValidateFlowOptions } from './contracts.js';
 import type {
-  ControlStepDefinition,
-  StepDefinitionBase,
+  DataProcessStepDefinition,
   EffectStepDefinition,
-  RouteStepDefinition,
-  SubflowEffectStepDefinition,
-  ExecutableProcessStepDefinition,
   FlowDefinition,
-  ProcessStepDefinition,
+  RouteStepDefinition,
   StepDefinition,
   StepId,
-  StepType,
-  SwitchStepDefinition,
   TerminalStepDefinition,
   WaitStepDefinition,
 } from '../dsl/types.js';
@@ -20,543 +14,316 @@ import { XCompileError } from '../errors/index.js';
 import type { ValidationIssue, ValidationResult } from '../errors/types.js';
 import { isNonEmptyString, isRecord } from '../utils/guards.js';
 import { isJsonSafe } from '../utils/json.js';
-import { isPathObject, isValidPath, isWritablePath } from '../utils/path.js';
 
 export type { ValidationIssue, ValidationResult } from '../errors/types.js';
 
-const STEP_TYPES = new Set<StepType>(['PROCESS', 'CONTROL', 'EFFECT', 'WAIT', 'TERMINAL']);
-const PROCESS_EXEC_SUBTYPES = new Set(['RULES', 'MAPPINGS', 'DECISIONS']);
-const PROCESS_ROUTING_SUBTYPES = new Set(['ROUTE', 'SWITCH']);
+// Flow 5 taxonomy — exactly one form for each category
+const PROCESS_SUBTYPES = new Set(['DATA']);
+const CONTROL_SUBTYPES = new Set(['ROUTE']);
 const EFFECT_SUBTYPES = new Set(['COMMAND', 'CALL', 'SUBFLOW']);
 const WAIT_SUBTYPES = new Set(['MESSAGE']);
 const TERMINAL_SUBTYPES = new Set(['COMPLETE', 'FAIL']);
+const REMOVED_PROCESS_SUBTYPES = new Set(['RULES', 'MAPPINGS', 'DECISIONS']);
+const REMOVED_CONTROL_SUBTYPES = new Set(['SWITCH']);
 
-const EXECUTABLE_PROCESS_ALLOWED_FIELDS = new Set([
-  'id',
-  'type',
-  'subtype',
-  'artefactId',
-  'contract',
-  'nextStepId',
-  'title',
-  'description',
-  'metadata',
-]);
-const ROUTE_ALLOWED_FIELDS = new Set([
-  'id',
-  'type',
-  'subtype',
-  'factRef',
-  'cases',
-  'defaultNextStepId',
-  'title',
-  'description',
-  'metadata',
-]);
-const SWITCH_ALLOWED_FIELDS = new Set([
-  'id',
-  'type',
-  'subtype',
-  'decisionSetId',
-  'cases',
-  'defaultNextStepId',
-  'title',
-  'description',
-  'metadata',
-]);
-const EFFECT_ALLOWED_FIELDS = new Set([
-  'id',
-  'type',
-  'subtype',
-  'operationId',
-  'inputRef',
-  'nextStepId',
-  'onErrorStepId',
-  'onTimeoutStepId',
-  'title',
-  'description',
-  'metadata',
-]);
-const SUBFLOW_EFFECT_ALLOWED_FIELDS = new Set([
-  'id',
-  'type',
-  'subtype',
-  'operationId',
-  'flowId',
-  'flowVersion',
-  'inputRef',
-  'nextStepId',
-  'onErrorStepId',
-  'onTimeoutStepId',
-  'title',
-  'description',
-  'metadata',
-]);
-const WAIT_ALLOWED_FIELDS = new Set([
-  'id',
-  'type',
-  'subtype',
-  'sourceStepId',
-  'nextStepId',
-  'onErrorStepId',
-  'onTimeoutStepId',
-  'title',
-  'description',
-  'metadata',
-]);
-const TERMINAL_ALLOWED_FIELDS = new Set([
-  'id',
-  'type',
-  'subtype',
-  'result',
-  'resultRef',
-  'title',
-  'description',
-  'metadata',
-]);
+// Allowed field sets — whitelist, not blacklist
+const FLOW_ALLOWED = new Set(['id', 'version', 'title', 'description', 'entryStepId', 'steps', 'metadata']);
+const BASE_ALLOWED = new Set(['id', 'type', 'subtype', 'title', 'description', 'metadata']);
+const DATA_ALLOWED = new Set([...BASE_ALLOWED, 'artefactId', 'nextStepId']);
+const ROUTE_ALLOWED = new Set([...BASE_ALLOWED, 'ref', 'cases', 'defaultNextStepId']);
+const EFFECT_ALLOWED = new Set([...BASE_ALLOWED, 'operationId', 'inputRef', 'nextStepId', 'onErrorStepId', 'onTimeoutStepId']);
+const SUBFLOW_ALLOWED = new Set([...EFFECT_ALLOWED, 'flowId', 'flowVersion']);
+const WAIT_ALLOWED = new Set([...BASE_ALLOWED, 'sourceStepId', 'nextStepId', 'onErrorStepId', 'onTimeoutStepId']);
+const TERMINAL_ALLOWED = new Set([...BASE_ALLOWED, 'result', 'resultRef']);
 
-function rootPath(field: string): string {
-  return `$.${field}`;
+function issue(code: string, message: string, path?: string): ValidationIssue {
+  const i: ValidationIssue = { code, message };
+  if (path) i.path = path;
+  return i;
 }
 
-function stepPath(stepKey: string, field?: string): string {
-  const prefix = `$.steps[${JSON.stringify(stepKey)}]`;
-  return field ? `${prefix}.${field}` : prefix;
-}
-
-function issue(
-  code: ValidationIssue['code'],
-  message: string,
-  path?: string,
-  details?: Record<string, unknown>,
-): ValidationIssue {
-  const result: ValidationIssue = { code, message };
-  if (path !== undefined) result.path = path;
-  if (details !== undefined) result.details = details;
-  return result;
-}
-
-function pushRequiredString(
-  errors: ValidationIssue[],
-  value: unknown,
-  path: string,
-  field: string,
-  code: ValidationIssue['code'] = 'FLOW_REQUIRED_FIELD_MISSING',
-): value is string {
-  if (!isNonEmptyString(value)) {
-    errors.push(issue(code, `${field} is required`, path));
-    return false;
+function validateStepBase(step: Record<string, unknown>, path: string, issues: ValidationIssue[]): void {
+  if (!isNonEmptyString(step['title'])) {
+    issues.push(issue('FLOW_STEP_TITLE_MISSING', `Step "${step['id']}" must have a non-empty title`, `${path}.title`));
   }
-  return true;
+  if (!isNonEmptyString(step['description'])) {
+    issues.push(issue('FLOW_STEP_DESCRIPTION_MISSING', `Step "${step['id']}" must have a non-empty description`, `${path}.description`));
+  }
+  // metadata must be a JSON-safe plain object if provided
+  if (step['metadata'] !== undefined) {
+    if (!isRecord(step['metadata']) || !isJsonSafe(step['metadata'])) {
+      issues.push(issue('FLOW_METADATA_INVALID', `Step "${step['id']}" metadata must be a JSON-safe plain object`, `${path}.metadata`));
+    }
+  }
 }
 
-function validateAllowedFields(
-  stepKey: string,
-  rawStep: Record<string, unknown>,
-  allowed: Set<string>,
-  errors: ValidationIssue[],
-): void {
-  for (const key of Object.keys(rawStep)) {
+function checkForbiddenFields(obj: Record<string, unknown>, allowed: Set<string>, path: string, issues: ValidationIssue[]): void {
+  for (const key of Object.keys(obj)) {
     if (!allowed.has(key)) {
-      errors.push(issue('FLOW_FIELD_FORBIDDEN', `Field is forbidden for this step: ${key}`, stepPath(stepKey, key)));
+      issues.push(issue('FLOW_STEP_FORBIDDEN_FIELD', `Field "${key}" is not allowed on this step type in Flow 5`, `${path}.${key}`));
     }
   }
 }
 
-function validateReadRef(errors: ValidationIssue[], value: unknown, path: string): void {
-  if (typeof value === 'string') {
-    if (!isValidPath(value)) {
-      errors.push(issue('FLOW_PATH_SYNTAX_INVALID', `Invalid path syntax: ${value}`, path));
-    }
-    return;
-  }
-
-  if (!isPathObject(value)) {
-    errors.push(issue('FLOW_PATH_SYNTAX_INVALID', 'contract.input.ref or EFFECT inputRef must be a path string or object of paths', path));
-    return;
-  }
-
-  for (const [key, nested] of Object.entries(value)) {
-    validateReadRef(errors, nested, `${path}.${key}`);
+// Validate that a transition target stepId exists in the flow
+function requireStepExists(stepId: unknown, stepIds: Set<StepId>, path: string, issues: ValidationIssue[]): void {
+  if (!isNonEmptyString(stepId)) return; // presence check handled separately
+  if (!stepIds.has(stepId)) {
+    issues.push(issue('FLOW_TRANSITION_NOT_FOUND', `Step "${stepId}" referenced in transition does not exist in steps`, path));
   }
 }
 
-function validateWriteRef(errors: ValidationIssue[], value: unknown, path: string, expectedPrefix?: string): void {
-  if (!isNonEmptyString(value)) {
-    errors.push(issue('FLOW_REQUIRED_FIELD_MISSING', 'contract.output.ref is required', path));
-    return;
+function validateDataStep(step: DataProcessStepDefinition, path: string, stepIds: Set<StepId>, issues: ValidationIssue[]): void {
+  const s = step as unknown as Record<string, unknown>;
+  checkForbiddenFields(s, DATA_ALLOWED, path, issues);
+  validateStepBase(s, path, issues);
+
+  if (!isNonEmptyString(step.artefactId)) {
+    issues.push(issue('FLOW_DATA_ARTEFACT_MISSING', `PROCESS/DATA step "${step.id}" must have a non-empty artefactId`, `${path}.artefactId`));
   }
-
-  if (!isValidPath(value)) {
-    errors.push(issue('FLOW_PATH_SYNTAX_INVALID', `Invalid path syntax: ${value}`, path));
-    return;
-  }
-
-  if (!isWritablePath(value)) {
-    errors.push(issue('FLOW_WRITE_NAMESPACE_FORBIDDEN', `Write path is forbidden: ${value}`, path));
-    return;
-  }
-
-  if (expectedPrefix !== undefined && !value.startsWith(expectedPrefix)) {
-    errors.push(issue('FLOW_WRITE_NAMESPACE_FORBIDDEN', `contract.output.ref must target ${expectedPrefix}`, path));
-  }
-}
-
-function validateCases(stepKey: string, value: unknown, path: string, errors: ValidationIssue[]): value is Record<string, StepId> {
-  if (!isRecord(value) || Object.keys(value).length === 0) {
-    errors.push(issue('FLOW_REQUIRED_FIELD_MISSING', 'cases must be a non-empty object', path));
-    return false;
-  }
-
-  for (const [caseKey, targetStepId] of Object.entries(value)) {
-    if (!isNonEmptyString(targetStepId)) {
-      errors.push(issue('FLOW_REQUIRED_FIELD_MISSING', `cases.${caseKey} must be a non-empty step id`, `${path}.${caseKey}`));
-    }
-  }
-
-  return true;
-}
-
-function validateTerminalResult(stepKey: string, step: TerminalStepDefinition, errors: ValidationIssue[]): void {
-  if (!isRecord(step.result) || !isJsonSafe(step.result)) {
-    errors.push(issue('FLOW_TERMINAL_RESULT_INVALID', 'TERMINAL.result must be a JSON-safe object', stepPath(stepKey, 'result')));
-    return;
-  }
-
-  if (!isNonEmptyString(step.result.outcome)) {
-    errors.push(issue('FLOW_TERMINAL_RESULT_INVALID', 'TERMINAL.result.outcome is required', stepPath(stepKey, 'result.outcome')));
-  }
-
-  if (step.result.status !== step.subtype) {
-    errors.push(
-      issue('FLOW_TERMINAL_RESULT_INVALID', 'TERMINAL.result.status must match TERMINAL subtype', stepPath(stepKey, 'result.status')),
-    );
-  }
-}
-
-function validateExecutableProcessStep(
-  stepKey: string,
-  rawStep: Record<string, unknown>,
-  step: ExecutableProcessStepDefinition,
-  errors: ValidationIssue[],
-): void {
-  validateAllowedFields(stepKey, rawStep, EXECUTABLE_PROCESS_ALLOWED_FIELDS, errors);
-  pushRequiredString(errors, step.artefactId, stepPath(stepKey, 'artefactId'), 'artefactId');
-  const contract = step.contract as { input?: { ref?: unknown }; output?: { ref?: unknown } } | undefined;
-  if (!contract || typeof contract !== 'object') {
-    errors.push(issue('FLOW_REQUIRED_FIELD_MISSING', 'contract is required', stepPath(stepKey, 'contract')));
+  if (!isNonEmptyString(step.nextStepId)) {
+    issues.push(issue('FLOW_STEP_NEXT_MISSING', `PROCESS/DATA step "${step.id}" must have a non-empty nextStepId`, `${path}.nextStepId`));
   } else {
-    if (contract.input === undefined || typeof contract.input !== 'object') {
-      errors.push(issue('FLOW_REQUIRED_FIELD_MISSING', 'contract.input.ref is required', stepPath(stepKey, 'contract.input')));
-    } else {
-      validateReadRef(errors, contract.input.ref, stepPath(stepKey, 'contract.input.ref'));
-    }
-    if (contract.output === undefined || typeof contract.output !== 'object') {
-      errors.push(issue('FLOW_REQUIRED_FIELD_MISSING', 'contract.output.ref is required', stepPath(stepKey, 'contract.output')));
-    } else {
-      validateWriteRef(errors, contract.output.ref, stepPath(stepKey, 'contract.output.ref'));
-    }
+    requireStepExists(step.nextStepId, stepIds, `${path}.nextStepId`, issues);
   }
-  pushRequiredString(errors, step.nextStepId, stepPath(stepKey, 'nextStepId'), 'nextStepId');
+
+  // Explicitly reject old Flow3 contract fields with diagnostic messages
+  if ('contract' in s)      issues.push(issue('FLOW_DATA_STEP_FORBIDDEN_FIELD', `PROCESS/DATA step "${step.id}" must not have "contract". Input/output is owned by the dataflow artifact.`, `${path}.contract`));
+  if ('inputRef' in s)      issues.push(issue('FLOW_DATA_STEP_FORBIDDEN_FIELD', `PROCESS/DATA step "${step.id}" must not have "inputRef"`, `${path}.inputRef`));
+  if ('outputRef' in s)     issues.push(issue('FLOW_DATA_STEP_FORBIDDEN_FIELD', `PROCESS/DATA step "${step.id}" must not have "outputRef"`, `${path}.outputRef`));
+  if ('cases' in s)         issues.push(issue('FLOW_DATA_STEP_FORBIDDEN_FIELD', `PROCESS/DATA step "${step.id}" must not have "cases". Routing belongs to CONTROL/ROUTE.`, `${path}.cases`));
+  if ('onErrorStepId' in s) issues.push(issue('FLOW_DATA_STEP_FORBIDDEN_FIELD', `PROCESS/DATA step "${step.id}" must not have "onErrorStepId". DATA is synchronous and pure.`, `${path}.onErrorStepId`));
 }
 
-function validateRouteStep(stepKey: string, rawStep: Record<string, unknown>, step: RouteStepDefinition, errors: ValidationIssue[]): void {
-  validateAllowedFields(stepKey, rawStep, ROUTE_ALLOWED_FIELDS, errors);
-  validateReadRef(errors, (step as { factRef?: unknown }).factRef, stepPath(stepKey, 'factRef'));
-  validateCases(stepKey, (step as { cases?: unknown }).cases, stepPath(stepKey, 'cases'), errors);
-  if (!isNonEmptyString((step as { defaultNextStepId?: unknown }).defaultNextStepId)) {
-    errors.push(issue('FLOW_ROUTE_DEFAULT_MISSING', 'ROUTE.defaultNextStepId is required', stepPath(stepKey, 'defaultNextStepId')));
-  }
-}
+function validateRouteStep(step: RouteStepDefinition, path: string, stepIds: Set<StepId>, issues: ValidationIssue[]): void {
+  const s = step as unknown as Record<string, unknown>;
+  checkForbiddenFields(s, ROUTE_ALLOWED, path, issues);
+  validateStepBase(s, path, issues);
 
-function validateSwitchStep(stepKey: string, rawStep: Record<string, unknown>, step: SwitchStepDefinition, errors: ValidationIssue[]): void {
-  validateAllowedFields(stepKey, rawStep, SWITCH_ALLOWED_FIELDS, errors);
-  pushRequiredString(errors, step.decisionSetId, stepPath(stepKey, 'decisionSetId'), 'decisionSetId');
-  validateCases(stepKey, step.cases, stepPath(stepKey, 'cases'), errors);
+  if ('factRef' in s)       issues.push(issue('FLOW_ROUTE_FACTREF_REMOVED', `CONTROL/ROUTE step "${step.id}" uses "factRef" which was removed in Flow 5. Use "ref" instead.`, `${path}.factRef`));
+  if ('decisionSetId' in s) issues.push(issue('FLOW_ROUTE_DECISIONSETID_REMOVED', `CONTROL/ROUTE step "${step.id}" uses "decisionSetId" which was removed in Flow 5. Use "ref" with explicit path.`, `${path}.decisionSetId`));
+
+  if (!isNonEmptyString(step.ref)) {
+    issues.push(issue('FLOW_ROUTE_REF_MISSING', `CONTROL/ROUTE step "${step.id}" must have a non-empty "ref"`, `${path}.ref`));
+  }
+  if (!isRecord(step.cases) || Object.keys(step.cases).length === 0) {
+    issues.push(issue('FLOW_ROUTE_CASES_MISSING', `CONTROL/ROUTE step "${step.id}" must have at least one case`, `${path}.cases`));
+  } else {
+    for (const [caseKey, targetId] of Object.entries(step.cases)) {
+      requireStepExists(targetId, stepIds, `${path}.cases.${caseKey}`, issues);
+    }
+  }
   if (!isNonEmptyString(step.defaultNextStepId)) {
-    errors.push(issue('FLOW_SWITCH_DEFAULT_MISSING', 'SWITCH.defaultNextStepId is required', stepPath(stepKey, 'defaultNextStepId')));
-  }
-}
-
-function validateEffectStep(stepKey: string, rawStep: Record<string, unknown>, step: EffectStepDefinition, errors: ValidationIssue[]): void {
-  if (step.subtype === 'SUBFLOW') {
-    validateAllowedFields(stepKey, rawStep, SUBFLOW_EFFECT_ALLOWED_FIELDS, errors);
-    pushRequiredString(errors, step.operationId, stepPath(stepKey, 'operationId'), 'operationId');
-    pushRequiredString(errors, (step as { flowId?: unknown }).flowId, stepPath(stepKey, 'flowId'), 'flowId');
-    pushRequiredString(errors, (step as { flowVersion?: unknown }).flowVersion, stepPath(stepKey, 'flowVersion'), 'flowVersion');
-    if (step.inputRef === undefined) {
-      errors.push(issue('FLOW_REQUIRED_FIELD_MISSING', 'inputRef is required', stepPath(stepKey, 'inputRef')));
-    } else {
-      validateReadRef(errors, step.inputRef, stepPath(stepKey, 'inputRef'));
-    }
-    pushRequiredString(errors, step.nextStepId, stepPath(stepKey, 'nextStepId'), 'nextStepId');
-    return;
-  }
-
-  validateAllowedFields(stepKey, rawStep, EFFECT_ALLOWED_FIELDS, errors);
-  pushRequiredString(errors, step.operationId, stepPath(stepKey, 'operationId'), 'operationId');
-  if (step.inputRef === undefined) {
-    errors.push(issue('FLOW_REQUIRED_FIELD_MISSING', 'inputRef is required', stepPath(stepKey, 'inputRef')));
+    issues.push(issue('FLOW_ROUTE_DEFAULT_MISSING', `CONTROL/ROUTE step "${step.id}" must have a defaultNextStepId`, `${path}.defaultNextStepId`));
   } else {
-    validateReadRef(errors, step.inputRef, stepPath(stepKey, 'inputRef'));
+    requireStepExists(step.defaultNextStepId, stepIds, `${path}.defaultNextStepId`, issues);
   }
-  pushRequiredString(errors, step.nextStepId, stepPath(stepKey, 'nextStepId'), 'nextStepId');
 }
 
-function validateWaitStep(stepKey: string, rawStep: Record<string, unknown>, step: WaitStepDefinition, errors: ValidationIssue[]): void {
-  validateAllowedFields(stepKey, rawStep, WAIT_ALLOWED_FIELDS, errors);
-  pushRequiredString(errors, step.sourceStepId, stepPath(stepKey, 'sourceStepId'), 'sourceStepId');
-  pushRequiredString(errors, step.nextStepId, stepPath(stepKey, 'nextStepId'), 'nextStepId');
+function validateEffectStep(step: EffectStepDefinition, path: string, stepIds: Set<StepId>, issues: ValidationIssue[]): void {
+  const s = step as unknown as Record<string, unknown>;
+  const allowed = step.subtype === 'SUBFLOW' ? SUBFLOW_ALLOWED : EFFECT_ALLOWED;
+  checkForbiddenFields(s, allowed, path, issues);
+  validateStepBase(s, path, issues);
+
+  if (!isNonEmptyString(step.operationId)) {
+    issues.push(issue('FLOW_EFFECT_OPERATION_MISSING', `EFFECT step "${step.id}" must have a non-empty operationId`, `${path}.operationId`));
+  }
+  if (typeof s['inputRef'] === 'object' && s['inputRef'] !== null) {
+    issues.push(issue('FLOW_OBJECT_INPUTREF_REMOVED', `EFFECT step "${step.id}" inputRef must be a string PathRef. Object inputRef was removed in Flow 5. Use an explicit data preparation PROCESS/DATA step.`, `${path}.inputRef`));
+  } else if (!isNonEmptyString(step.inputRef)) {
+    issues.push(issue('FLOW_EFFECT_INPUT_MISSING', `EFFECT step "${step.id}" must have a non-empty inputRef`, `${path}.inputRef`));
+  }
+  if (!isNonEmptyString(step.nextStepId)) {
+    issues.push(issue('FLOW_STEP_NEXT_MISSING', `EFFECT step "${step.id}" must have nextStepId`, `${path}.nextStepId`));
+  } else {
+    requireStepExists(step.nextStepId, stepIds, `${path}.nextStepId`, issues);
+  }
+  // onErrorStepId is required in Flow 5 — external failure is a lifecycle outcome
   if (!isNonEmptyString(step.onErrorStepId)) {
-    errors.push(issue('FLOW_WAIT_BRANCH_MISSING', 'WAIT.onErrorStepId is required', stepPath(stepKey, 'onErrorStepId')));
+    issues.push(issue('FLOW_EFFECT_ON_ERROR_MISSING', `EFFECT step "${step.id}" must have onErrorStepId. External failure is a lifecycle outcome that must be explicitly handled.`, `${path}.onErrorStepId`));
+  } else {
+    requireStepExists(step.onErrorStepId, stepIds, `${path}.onErrorStepId`, issues);
+  }
+  if (isNonEmptyString(step.onTimeoutStepId)) {
+    requireStepExists(step.onTimeoutStepId, stepIds, `${path}.onTimeoutStepId`, issues);
+  }
+
+  if (step.subtype === 'SUBFLOW') {
+    const sf = step as import('../dsl/types.js').SubflowEffectStepDefinition;
+    if (!isNonEmptyString(sf.flowId)) issues.push(issue('FLOW_SUBFLOW_FLOW_ID_MISSING', `SUBFLOW step "${step.id}" must have a non-empty flowId`, `${path}.flowId`));
+    if (!isNonEmptyString(sf.flowVersion)) issues.push(issue('FLOW_SUBFLOW_FLOW_VERSION_MISSING', `SUBFLOW step "${step.id}" must have a non-empty flowVersion`, `${path}.flowVersion`));
+  }
+}
+
+function validateWaitStep(step: WaitStepDefinition, path: string, stepIds: Set<StepId>, allSteps: Record<string, unknown>, issues: ValidationIssue[]): void {
+  const s = step as unknown as Record<string, unknown>;
+  checkForbiddenFields(s, WAIT_ALLOWED, path, issues);
+  validateStepBase(s, path, issues);
+
+  if (!isNonEmptyString(step.sourceStepId)) {
+    issues.push(issue('FLOW_WAIT_SOURCE_MISSING', `WAIT step "${step.id}" must have sourceStepId`, `${path}.sourceStepId`));
+  } else {
+    requireStepExists(step.sourceStepId, stepIds, `${path}.sourceStepId`, issues);
+    // sourceStepId must reference an EFFECT step
+    const sourceStep = allSteps[step.sourceStepId] as Record<string, unknown> | undefined;
+    if (sourceStep && sourceStep['type'] !== 'EFFECT') {
+      issues.push(issue('FLOW_WAIT_SOURCE_NOT_EFFECT', `WAIT step "${step.id}" sourceStepId must reference an EFFECT step, but "${step.sourceStepId}" is type "${sourceStep['type']}"`, `${path}.sourceStepId`));
+    }
+    if (step.sourceStepId === step.id) {
+      issues.push(issue('FLOW_WAIT_SOURCE_NOT_EFFECT', `WAIT step "${step.id}" sourceStepId must not reference itself`, `${path}.sourceStepId`));
+    }
+  }
+  if (!isNonEmptyString(step.nextStepId)) {
+    issues.push(issue('FLOW_STEP_NEXT_MISSING', `WAIT step "${step.id}" must have nextStepId`, `${path}.nextStepId`));
+  } else {
+    requireStepExists(step.nextStepId, stepIds, `${path}.nextStepId`, issues);
+  }
+  if (!isNonEmptyString(step.onErrorStepId)) {
+    issues.push(issue('FLOW_WAIT_ERROR_MISSING', `WAIT step "${step.id}" must have onErrorStepId`, `${path}.onErrorStepId`));
+  } else {
+    requireStepExists(step.onErrorStepId, stepIds, `${path}.onErrorStepId`, issues);
   }
   if (!isNonEmptyString(step.onTimeoutStepId)) {
-    errors.push(issue('FLOW_WAIT_BRANCH_MISSING', 'WAIT.onTimeoutStepId is required', stepPath(stepKey, 'onTimeoutStepId')));
+    issues.push(issue('FLOW_WAIT_TIMEOUT_MISSING', `WAIT step "${step.id}" must have onTimeoutStepId`, `${path}.onTimeoutStepId`));
+  } else {
+    requireStepExists(step.onTimeoutStepId, stepIds, `${path}.onTimeoutStepId`, issues);
   }
 }
 
-function validateTerminalStep(stepKey: string, rawStep: Record<string, unknown>, step: TerminalStepDefinition, errors: ValidationIssue[]): void {
-  validateAllowedFields(stepKey, rawStep, TERMINAL_ALLOWED_FIELDS, errors);
+function validateTerminalStep(step: TerminalStepDefinition, path: string, issues: ValidationIssue[]): void {
+  const s = step as unknown as Record<string, unknown>;
+  checkForbiddenFields(s, TERMINAL_ALLOWED, path, issues);
+  validateStepBase(s, path, issues);
 
   const hasResult = step.result !== undefined;
-  const hasResultRef = step.resultRef !== undefined;
+  const hasRef = step.resultRef !== undefined;
 
-  if (!hasResult && !hasResultRef) {
-    errors.push(issue('FLOW_TERMINAL_RESULT_INVALID', 'TERMINAL must have either "result" or "resultRef"', stepPath(stepKey)));
+  if (hasResult && hasRef) {
+    issues.push(issue('FLOW_TERMINAL_RESULT_AMBIGUOUS', `TERMINAL step "${step.id}" must have exactly one of result or resultRef, not both`, `${path}.result`));
+  } else if (!hasResult && !hasRef) {
+    issues.push(issue('FLOW_TERMINAL_RESULT_MISSING', `TERMINAL step "${step.id}" must have either result or resultRef`, `${path}.result`));
+  }
+
+  if (hasRef) {
+    if (typeof step.resultRef !== 'string' || !step.resultRef.startsWith('$.context.data.results.')) {
+      issues.push(issue('FLOW_TERMINAL_RESULTREF_INVALID', `TERMINAL step "${step.id}" resultRef must start with "$.context.data.results."`, `${path}.resultRef`));
+    }
+  }
+
+  if (hasResult && step.result) {
+    if (!isJsonSafe(step.result)) {
+      issues.push(issue('FLOW_TERMINAL_RESULT_NOT_JSON_SAFE', `TERMINAL step "${step.id}" result must be JSON-safe`, `${path}.result`));
+    }
+    if (!isNonEmptyString(step.result.status)) {
+      issues.push(issue('FLOW_TERMINAL_RESULT_STATUS_MISSING', `TERMINAL step "${step.id}" result must have a non-empty status`, `${path}.result.status`));
+    } else if (step.result.status !== step.subtype) {
+      // result.status must match the TERMINAL subtype: COMPLETE/FAIL
+      issues.push(issue('FLOW_TERMINAL_RESULT_STATUS_MISMATCH', `TERMINAL step "${step.id}" result.status "${step.result.status}" must match subtype "${step.subtype}"`, `${path}.result.status`));
+    }
+    if (!isNonEmptyString(step.result.outcome)) {
+      issues.push(issue('FLOW_TERMINAL_RESULT_OUTCOME_MISSING', `TERMINAL step "${step.id}" result must have a non-empty outcome`, `${path}.result.outcome`));
+    }
+  }
+}
+
+function validateStep(step: StepDefinition, path: string, stepIds: Set<StepId>, allSteps: Record<string, unknown>, issues: ValidationIssue[]): void {
+  const s = step as unknown as Record<string, unknown>;
+
+  if (step.type === 'PROCESS' && REMOVED_PROCESS_SUBTYPES.has(step.subtype)) {
+    issues.push(issue('FLOW_INVALID_SUBTYPE', `PROCESS/${step.subtype} is not supported in Flow 5. Wrap it in PROCESS/DATA with a dataflow artifact.`, path));
+    return;
+  }
+  if (step.type === 'CONTROL' && REMOVED_CONTROL_SUBTYPES.has(step.subtype)) {
+    issues.push(issue('FLOW_INVALID_SUBTYPE', `CONTROL/${step.subtype} is not supported in Flow 5. Use CONTROL/ROUTE with an explicit "ref" field.`, path));
     return;
   }
 
-  if (hasResult && hasResultRef) {
-    errors.push(issue('FLOW_TERMINAL_RESULT_INVALID', 'TERMINAL cannot have both "result" and "resultRef"', stepPath(stepKey)));
-    return;
-  }
-
-  if (hasResult) {
-    validateTerminalResult(stepKey, step, errors);
-  } else {
-    if (!isNonEmptyString(step.resultRef)) {
-      errors.push(issue('FLOW_TERMINAL_RESULT_INVALID', 'TERMINAL.resultRef must be a non-empty string path', stepPath(stepKey, 'resultRef')));
-    } else if (!isValidPath(step.resultRef)) {
-      errors.push(issue('FLOW_PATH_SYNTAX_INVALID', `TERMINAL.resultRef has invalid path syntax: ${step.resultRef}`, stepPath(stepKey, 'resultRef')));
-    }
-  }
-}
-
-function validateStep(stepKey: string, rawStep: unknown, errors: ValidationIssue[]): StepDefinition | null {
-  if (!isRecord(rawStep)) {
-    errors.push(issue('FLOW_REQUIRED_FIELD_MISSING', 'Step definition must be an object', stepPath(stepKey)));
-    return null;
-  }
-
-  const stepIdOk = pushRequiredString(errors, rawStep.id, stepPath(stepKey, 'id'), 'id');
-  const stepTypeOk = pushRequiredString(errors, rawStep.type, stepPath(stepKey, 'type'), 'type');
-  const stepSubtypeOk = pushRequiredString(errors, rawStep.subtype, stepPath(stepKey, 'subtype'), 'subtype');
-  if (rawStep.metadata !== undefined && !isJsonSafe(rawStep.metadata)) {
-    errors.push(issue('FLOW_REQUIRED_FIELD_MISSING', 'metadata must be JSON-safe', stepPath(stepKey, 'metadata')));
-  }
-  if (!stepIdOk || !stepTypeOk || !stepSubtypeOk) return null;
-
-  if (rawStep.id !== stepKey) {
-    errors.push(
-      issue('FLOW_STEP_ID_MISMATCH', 'Step key must match step.id', stepPath(stepKey, 'id'), {
-        key: stepKey,
-        stepId: rawStep.id,
-      }),
-    );
-  }
-
-  if (!STEP_TYPES.has(rawStep.type as StepType)) {
-    errors.push(issue('FLOW_INVALID_TYPE', `Unsupported step type: ${String(rawStep.type)}`, stepPath(stepKey, 'type')));
-    return null;
-  }
-
-  const step = rawStep as unknown as StepDefinition;
-
-  if (step.type === 'PROCESS') {
-    if (PROCESS_EXEC_SUBTYPES.has(step.subtype)) {
-      validateExecutableProcessStep(stepKey, rawStep, step as ExecutableProcessStepDefinition, errors);
-      return step;
-    }
-    errors.push(issue('FLOW_INVALID_SUBTYPE', `Unsupported PROCESS subtype: ${String(step.subtype)}`, stepPath(stepKey, 'subtype')));
-    return null;
-  }
-
-  if (step.type === 'CONTROL') {
-    if (step.subtype === 'ROUTE') {
-      validateRouteStep(stepKey, rawStep, step as RouteStepDefinition, errors);
-      return step;
-    }
-    if (step.subtype === 'SWITCH') {
-      validateSwitchStep(stepKey, rawStep, step as SwitchStepDefinition, errors);
-      return step;
-    }
-    errors.push(issue('FLOW_INVALID_SUBTYPE', `Unsupported CONTROL subtype: ${String((step as StepDefinitionBase).subtype)}`, stepPath(stepKey, 'subtype')));
-    return null;
-  }
-
-  if (step.type === 'EFFECT') {
-    if (!EFFECT_SUBTYPES.has(step.subtype)) {
-      errors.push(issue('FLOW_INVALID_SUBTYPE', `Unsupported EFFECT subtype: ${String(step.subtype)}`, stepPath(stepKey, 'subtype')));
-      return null;
-    }
-    validateEffectStep(stepKey, rawStep, step as EffectStepDefinition, errors);
-    return step;
-  }
-
-  if (step.type === 'WAIT') {
-    if (!WAIT_SUBTYPES.has(step.subtype)) {
-      errors.push(issue('FLOW_INVALID_SUBTYPE', `Unsupported WAIT subtype: ${String(step.subtype)}`, stepPath(stepKey, 'subtype')));
-      return null;
-    }
-    validateWaitStep(stepKey, rawStep, step as WaitStepDefinition, errors);
-    return step;
-  }
-
-  if (!TERMINAL_SUBTYPES.has(step.subtype)) {
-    errors.push(issue('FLOW_INVALID_SUBTYPE', `Unsupported TERMINAL subtype: ${String(step.subtype)}`, stepPath(stepKey, 'subtype')));
-    return null;
-  }
-
-  validateTerminalStep(stepKey, rawStep, step as TerminalStepDefinition, errors);
-  return step;
-}
-
-function collectTargets(step: StepDefinition): StepId[] {
-  if (step.type === 'PROCESS') {
-    return [(step as ExecutableProcessStepDefinition).nextStepId];
-  }
-
-  if (step.type === 'CONTROL') {
-    return [...Object.values((step as RouteStepDefinition | SwitchStepDefinition).cases), (step as RouteStepDefinition).defaultNextStepId];
-  }
-
-  if (step.type === 'EFFECT') {
-    const targets = [step.nextStepId];
-    if (step.onErrorStepId !== undefined) targets.push(step.onErrorStepId);
-    if (step.onTimeoutStepId !== undefined) targets.push(step.onTimeoutStepId);
-    return targets;
-  }
-
-  if (step.type === 'WAIT') {
-    return [step.nextStepId, step.onErrorStepId, step.onTimeoutStepId];
-  }
-
-  return [];
-}
-
-function validateGraph(flow: FlowDefinition, stepsById: Record<StepId, StepDefinition>, errors: ValidationIssue[]): void {
-  const stepIds = new Set(Object.keys(stepsById));
-
-  for (const step of Object.values(stepsById)) {
-    for (const targetStepId of collectTargets(step)) {
-      if (!stepIds.has(targetStepId)) {
-        errors.push(
-          issue('FLOW_STEP_REF_NOT_FOUND', `Transition target not found: ${targetStepId}`, undefined, {
-            stepId: step.id,
-            targetStepId,
-          }),
-        );
-      }
-    }
-  }
-
-  for (const step of Object.values(stepsById)) {
-    if (step.type !== 'WAIT') continue;
-    const sourceStep = stepsById[step.sourceStepId];
-    if (!sourceStep || sourceStep.type !== 'EFFECT') {
-      errors.push(issue('FLOW_WAIT_SOURCE_INVALID', 'WAIT.sourceStepId must reference an EFFECT step', stepPath(step.id, 'sourceStepId')));
-    }
-  }
-
-  if (!stepIds.has(flow.entryStepId)) {
-    errors.push(issue('FLOW_ENTRY_STEP_NOT_FOUND', `entryStepId is not present in steps: ${flow.entryStepId}`, rootPath('entryStepId')));
-    return;
-  }
-
-  const entryStep = stepsById[flow.entryStepId];
-  if (entryStep?.type === 'TERMINAL' && (entryStep as TerminalStepDefinition).resultRef) {
-    errors.push(issue(
-      'FLOW_TERMINAL_RESULT_INVALID',
-      'entryStepId cannot point to a TERMINAL step with resultRef: context is empty at process creation',
-      rootPath('entryStepId'),
-    ));
-  }
-
-  const reachable = new Set<StepId>();
-  const queue: StepId[] = [flow.entryStepId];
-
-  while (queue.length > 0) {
-    const currentStepId = queue.shift()!;
-    if (reachable.has(currentStepId)) continue;
-    reachable.add(currentStepId);
-    const currentStep = stepsById[currentStepId];
-    if (!currentStep) continue;
-    for (const targetStepId of collectTargets(currentStep)) {
-      if (!reachable.has(targetStepId)) queue.push(targetStepId);
-    }
-  }
-
-  for (const stepId of Object.keys(stepsById)) {
-    if (!reachable.has(stepId)) {
-      errors.push(issue('FLOW_ORPHAN_STEP', `Step is unreachable from entryStepId: ${stepId}`, stepPath(stepId), { stepId }));
-    }
-  }
-
-  const reachableTerminalCount = Object.values(stepsById).filter((step) => step.type === 'TERMINAL' && reachable.has(step.id)).length;
-  if (reachableTerminalCount === 0) {
-    errors.push(issue('FLOW_TERMINAL_NOT_REACHABLE', 'Flow must contain at least one reachable TERMINAL step'));
+  switch (step.type) {
+    case 'PROCESS':
+      if (!PROCESS_SUBTYPES.has(step.subtype)) { issues.push(issue('FLOW_INVALID_SUBTYPE', `PROCESS/${step.subtype} is not valid in Flow 5. Allowed: PROCESS/DATA`, path)); return; }
+      validateDataStep(step as DataProcessStepDefinition, path, stepIds, issues);
+      break;
+    case 'CONTROL':
+      if (!CONTROL_SUBTYPES.has(step.subtype)) { issues.push(issue('FLOW_INVALID_SUBTYPE', `CONTROL/${step.subtype} is not valid in Flow 5. Allowed: CONTROL/ROUTE`, path)); return; }
+      validateRouteStep(step as RouteStepDefinition, path, stepIds, issues);
+      break;
+    case 'EFFECT':
+      if (!EFFECT_SUBTYPES.has(step.subtype)) { issues.push(issue('FLOW_INVALID_SUBTYPE', `EFFECT/${step.subtype} is not valid. Allowed: COMMAND, CALL, SUBFLOW`, path)); return; }
+      validateEffectStep(step as EffectStepDefinition, path, stepIds, issues);
+      break;
+    case 'WAIT':
+      if (!WAIT_SUBTYPES.has(step.subtype)) { issues.push(issue('FLOW_INVALID_SUBTYPE', `WAIT/${step.subtype} is not valid. Allowed: MESSAGE`, path)); return; }
+      validateWaitStep(step as WaitStepDefinition, path, stepIds, allSteps, issues);
+      break;
+    case 'TERMINAL':
+      if (!TERMINAL_SUBTYPES.has(step.subtype)) { issues.push(issue('FLOW_INVALID_SUBTYPE', `TERMINAL/${step.subtype} is not valid. Allowed: COMPLETE, FAIL`, path)); return; }
+      validateTerminalStep(step as TerminalStepDefinition, path, issues);
+      break;
+    default:
+      issues.push(issue('FLOW_INVALID_TYPE', `Unknown step type: "${(s)['type']}"`, path));
   }
 }
 
-export function validateFlow(flow: unknown, _options: ValidateFlowOptions = {}): ValidationResult {
-  const errors: ValidationIssue[] = [];
-  const warnings: ValidationIssue[] = [];
+export function validateFlow(source: unknown, options?: ValidateFlowOptions): ValidationResult {
+  const issues: ValidationIssue[] = [];
 
-  if (!isRecord(flow)) {
-    return {
-      isValid: false,
-      errors: [issue('FLOW_REQUIRED_FIELD_MISSING', 'Flow must be an object', '$')],
-      warnings,
-    };
+  if (!isRecord(source)) {
+    return { ok: false, issues: [issue('FLOW_SOURCE_INVALID', 'Flow source must be a non-null object')] };
   }
 
-  pushRequiredString(errors, flow.id, rootPath('id'), 'id', 'FLOW_ID_REQUIRED');
-  pushRequiredString(errors, flow.version, rootPath('version'), 'version', 'FLOW_VERSION_REQUIRED');
-  pushRequiredString(errors, flow.entryStepId, rootPath('entryStepId'), 'entryStepId', 'FLOW_ENTRY_STEP_NOT_FOUND');
-
-  if (flow.metadata !== undefined && !isJsonSafe(flow.metadata)) {
-    errors.push(issue('FLOW_REQUIRED_FIELD_MISSING', 'metadata must be JSON-safe', rootPath('metadata')));
+  for (const key of Object.keys(source)) {
+    if (!FLOW_ALLOWED.has(key)) {
+      issues.push(issue('FLOW_SOURCE_FORBIDDEN_FIELD', `Flow source field "${key}" is not part of the Flow 5 contract`, key));
+    }
   }
 
-  if (!isRecord(flow.steps) || Object.keys(flow.steps).length === 0) {
-    errors.push(issue('FLOW_STEPS_EMPTY', 'steps must be a non-empty object', rootPath('steps')));
-    return { isValid: false, errors, warnings };
+  if (!isNonEmptyString(source['id']))          issues.push(issue('FLOW_ID_MISSING', 'Flow must have a non-empty id', 'id'));
+  if (!isNonEmptyString(source['version']))      issues.push(issue('FLOW_VERSION_MISSING', 'Flow must have a non-empty version', 'version'));
+  if (!isNonEmptyString(source['title']))        issues.push(issue('FLOW_TITLE_MISSING', 'Flow must have a non-empty title', 'title'));
+  if (!isNonEmptyString(source['description']))  issues.push(issue('FLOW_DESCRIPTION_MISSING', 'Flow must have a non-empty description', 'description'));
+  if (!isNonEmptyString(source['entryStepId']))  issues.push(issue('FLOW_ENTRY_MISSING', 'Flow must have a non-empty entryStepId', 'entryStepId'));
+
+  // metadata: if present, must be a JSON-safe plain object
+  if (source['metadata'] !== undefined && (!isRecord(source['metadata']) || !isJsonSafe(source['metadata']))) {
+    issues.push(issue('FLOW_METADATA_INVALID', 'Flow metadata must be a JSON-safe plain object', 'metadata'));
   }
 
-  const typedFlow = flow as unknown as FlowDefinition;
-  const validStepsById: Record<StepId, StepDefinition> = {};
-
-  for (const [stepKey, rawStep] of Object.entries(typedFlow.steps)) {
-    const validatedStep = validateStep(stepKey, rawStep, errors);
-    if (validatedStep) validStepsById[stepKey] = validatedStep;
+  if (!isRecord(source['steps'])) {
+    issues.push(issue('FLOW_STEPS_MISSING', 'Flow must have a non-empty steps object', 'steps'));
+    return { ok: issues.length === 0, issues };
   }
 
-  if (Object.keys(validStepsById).length > 0) {
-    validateGraph(typedFlow, validStepsById, errors);
+  const flow = source as unknown as FlowDefinition;
+  const stepIds = new Set(Object.keys(flow.steps));
+  const allSteps = flow.steps as unknown as Record<string, unknown>;
+
+  if (stepIds.size === 0) {
+    issues.push(issue('FLOW_STEPS_EMPTY', 'Flow steps must contain at least one step', 'steps'));
+    return { ok: false, issues };
   }
 
-  return {
-    isValid: errors.length === 0,
-    errors,
-    warnings,
-  };
+  if (isNonEmptyString(flow.entryStepId) && !stepIds.has(flow.entryStepId)) {
+    issues.push(issue('FLOW_ENTRY_NOT_FOUND', `entryStepId "${flow.entryStepId}" does not exist in steps`, 'entryStepId'));
+  }
+
+  for (const [id, step] of Object.entries(flow.steps)) {
+    if (!isRecord(step)) { issues.push(issue('FLOW_STEP_INVALID', `Step "${id}" must be an object`, `steps.${id}`)); continue; }
+    if (step['id'] !== id) issues.push(issue('FLOW_STEP_ID_MISMATCH', `Step id "${step['id']}" does not match key "${id}"`, `steps.${id}.id`));
+    if (!isNonEmptyString(step['id']))      issues.push(issue('FLOW_STEP_ID_MISSING', `Step "${id}" must have a non-empty id`, `steps.${id}.id`));
+    if (!isNonEmptyString(step['type']))    issues.push(issue('FLOW_STEP_TYPE_MISSING', `Step "${id}" must have a non-empty type`, `steps.${id}.type`));
+    if (!isNonEmptyString(step['subtype'])) issues.push(issue('FLOW_STEP_SUBTYPE_MISSING', `Step "${id}" must have a non-empty subtype`, `steps.${id}.subtype`));
+    if (!isNonEmptyString(step['id']) || !isNonEmptyString(step['type']) || !isNonEmptyString(step['subtype'])) continue;
+    validateStep(step as unknown as StepDefinition, `steps.${id}`, stepIds, allSteps, issues);
+  }
+
+  return { ok: issues.length === 0, issues };
 }
 
-export function prepareFlow(flow: unknown, options: PrepareFlowOptions = {}) {
-  const validation = validateFlow(flow, options);
-  if (!validation.isValid) {
-    throw new XCompileError('Flow preparation failed', validation.errors);
+export function prepareFlow(source: unknown, options?: PrepareFlowOptions): import('./compiled.js').PreparedFlow {
+  const validation = validateFlow(source, options);
+  if (!validation.ok) {
+    throw new XCompileError('Flow validation failed', validation.issues);
   }
-
-  return createPreparedFlow(flow as FlowDefinition);
+  return createPreparedFlow(source as FlowDefinition, options);
 }

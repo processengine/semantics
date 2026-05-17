@@ -1,7 +1,7 @@
 {
   "name": "@processengine/semantics",
-  "version": "1.1.0",
-  "description": "Canonical implementation of subject-level process semantics for the ProcessEngine family. Interprets Flow3 DSL and provides transport-safe process state transitions.",
+  "version": "2.0.0",
+  "description": "Flow 5 process semantics for ProcessEngine. Validates, prepares and executes Flow 5 DSL: PROCESS/DATA, CONTROL/ROUTE, EFFECT, WAIT, TERMINAL.",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -54,9 +54,10 @@
     "test": "npm run build && vitest run",
     "bench": "node benchmarks/run.mjs",
     "check": "npm test",
-    "release:check": "npm test",
-    "prepublishOnly": "echo 'Publish only via GitHub Actions. See release workflow.' && exit 1",
-    "version": "git add CHANGELOG.md package-lock.json package.json"
+    "release:check": "npm test && npm run test:pack",
+    "prepublishOnly": "echo 'Publish only via GitHub Actions.' && exit 1",
+    "version": "git add CHANGELOG.md package-lock.json package.json",
+    "test:pack": "node scripts/pack-smoke.mjs"
   },
   "devDependencies": {
     "ajv": "^8.20.0",

@@ -1,0 +1,79 @@
+{
+  "id": "flow.abs.find_client",
+  "version": "1.0.0",
+  "title": "Поиск клиента в АБС",
+  "description": "Пример Flow 5 процесса с EFFECT/CALL → WAIT → PROCESS/DATA.",
+  "entryStepId": "call_abs_find_client",
+  "steps": {
+    "call_abs_find_client": {
+      "id": "call_abs_find_client",
+      "type": "EFFECT",
+      "subtype": "CALL",
+      "title": "Вызвать АБС: поиск клиента",
+      "description": "Отправляет асинхронный запрос в АБС на поиск клиента по реквизитам.",
+      "operationId": "abs.findClient",
+      "inputRef": "$.context.input.application",
+      "nextStepId": "wait_abs_find_client",
+      "onErrorStepId": "finish_technical_error",
+      "onTimeoutStepId": "finish_technical_error"
+    },
+    "wait_abs_find_client": {
+      "id": "wait_abs_find_client",
+      "type": "WAIT",
+      "subtype": "MESSAGE",
+      "title": "Ожидать ответа АБС",
+      "description": "Ожидает входящее сообщение с результатом поиска клиента.",
+      "sourceStepId": "call_abs_find_client",
+      "nextStepId": "evaluate_find_client_result",
+      "onErrorStepId": "finish_technical_error",
+      "onTimeoutStepId": "finish_technical_error"
+    },
+    "evaluate_find_client_result": {
+      "id": "evaluate_find_client_result",
+      "type": "PROCESS",
+      "subtype": "DATA",
+      "title": "Оценить результат поиска клиента",
+      "description": "Запускает dataflow для сбора фактов по найденным карточкам и выбора сценария.",
+      "artefactId": "dataflow.abs.evaluate_find_client_result",
+      "nextStepId": "route_find_client_scenario"
+    },
+    "route_find_client_scenario": {
+      "id": "route_find_client_scenario",
+      "type": "CONTROL",
+      "subtype": "ROUTE",
+      "title": "Выбрать сценарий по результату поиска",
+      "description": "Маршрутизирует по outcome решения dataflow.",
+      "ref": "$.context.data.decisions.findClientScenario.outcome",
+      "cases": {
+        "FOUND_OWN_SERVICE": "finish_found",
+        "NOT_FOUND": "finish_not_found",
+        "AMBIGUOUS": "finish_technical_error"
+      },
+      "defaultNextStepId": "finish_technical_error"
+    },
+    "finish_found": {
+      "id": "finish_found",
+      "type": "TERMINAL",
+      "subtype": "COMPLETE",
+      "title": "Завершить: клиент найден",
+      "description": "Возвращает результат с найденной карточкой клиента.",
+      "resultRef": "$.context.data.results.findClient"
+    },
+    "finish_not_found": {
+      "id": "finish_not_found",
+      "type": "TERMINAL",
+      "subtype": "COMPLETE",
+      "title": "Завершить: клиент не найден",
+      "description": "Возвращает результат о том, что карточка клиента не существует.",
+      "result": { "status": "COMPLETE", "outcome": "NOT_FOUND" }
+    },
+    "finish_technical_error": {
+      "id": "finish_technical_error",
+      "type": "TERMINAL",
+      "subtype": "FAIL",
+      "title": "Завершить: техническая ошибка",
+      "description": "Фиксирует техническую ошибку исполнения.",
+      "result": { "status": "FAIL", "outcome": "TECHNICAL_ERROR" }
+    }
+  }
+}

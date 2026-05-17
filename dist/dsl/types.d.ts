@@ -2,18 +2,11 @@ import type { JsonObject, JsonValue } from '../utils/json.js';
 export type StepId = string;
 export type PathRef = string;
 export type StepType = 'PROCESS' | 'CONTROL' | 'EFFECT' | 'WAIT' | 'TERMINAL';
-export type ExecutableProcessSubtype = 'RULES' | 'MAPPINGS' | 'DECISIONS';
-export type ControlStepSubtype = 'ROUTE' | 'SWITCH';
-/** @deprecated Use ControlStepSubtype for routing steps */
-export type RoutingProcessSubtype = ControlStepSubtype;
-export type ProcessStepSubtype = ExecutableProcessSubtype;
+export type ProcessStepSubtype = 'DATA';
+export type ControlStepSubtype = 'ROUTE';
 export type EffectStepSubtype = 'COMMAND' | 'CALL' | 'SUBFLOW';
 export type WaitStepSubtype = 'MESSAGE';
 export type TerminalResultStatus = 'COMPLETE' | 'FAIL';
-export interface InputRefObject {
-    [key: string]: PathRef | InputRefObject;
-}
-export type InputRef = PathRef | InputRefObject;
 export interface TerminalResult {
     status: TerminalResultStatus;
     outcome: string;
@@ -22,58 +15,42 @@ export interface TerminalResult {
 export interface FlowDefinition {
     id: string;
     version: string;
+    title: string;
+    description: string;
     entryStepId: StepId;
-    title?: string;
-    description?: string;
-    metadata?: JsonObject;
     steps: Record<StepId, StepDefinition>;
+    metadata?: JsonObject;
 }
 export interface StepDefinitionBase {
     id: StepId;
     type: StepType;
     subtype: string;
-    title?: string;
-    description?: string;
+    title: string;
+    description: string;
     metadata?: JsonObject;
 }
-export interface StepContract {
-    input: {
-        ref: InputRef;
-        fields?: JsonObject;
-    };
-    output: {
-        ref: PathRef;
-        fields?: JsonObject;
-    };
-}
-export interface ExecutableProcessStepDefinition extends StepDefinitionBase {
+export interface DataProcessStepDefinition extends StepDefinitionBase {
     type: 'PROCESS';
-    subtype: ExecutableProcessSubtype;
+    subtype: 'DATA';
     artefactId: string;
-    contract: StepContract;
     nextStepId: StepId;
 }
+export type ProcessStepDefinition = DataProcessStepDefinition;
 export interface RouteStepDefinition extends StepDefinitionBase {
     type: 'CONTROL';
     subtype: 'ROUTE';
-    factRef: PathRef;
+    ref: PathRef;
     cases: Record<string, StepId>;
     defaultNextStepId: StepId;
 }
-export interface SwitchStepDefinition extends StepDefinitionBase {
-    type: 'CONTROL';
-    subtype: 'SWITCH';
-    decisionSetId: string;
-    cases: Record<string, StepId>;
-    defaultNextStepId: StepId;
-}
+export type ControlStepDefinition = RouteStepDefinition;
 export interface CommandCallEffectStepDefinition extends StepDefinitionBase {
     type: 'EFFECT';
     subtype: 'COMMAND' | 'CALL';
     operationId: string;
-    inputRef: InputRef;
+    inputRef: PathRef;
     nextStepId: StepId;
-    onErrorStepId?: StepId;
+    onErrorStepId: StepId;
     onTimeoutStepId?: StepId;
 }
 export interface SubflowEffectStepDefinition extends StepDefinitionBase {
@@ -82,9 +59,9 @@ export interface SubflowEffectStepDefinition extends StepDefinitionBase {
     operationId: string;
     flowId: string;
     flowVersion: string;
-    inputRef: InputRef;
+    inputRef: PathRef;
     nextStepId: StepId;
-    onErrorStepId?: StepId;
+    onErrorStepId: StepId;
     onTimeoutStepId?: StepId;
 }
 export type EffectStepDefinition = CommandCallEffectStepDefinition | SubflowEffectStepDefinition;
@@ -99,16 +76,7 @@ export interface WaitStepDefinition extends StepDefinitionBase {
 export interface TerminalStepDefinition extends StepDefinitionBase {
     type: 'TERMINAL';
     subtype: TerminalResultStatus;
-    /** Static inline result. Exactly one of `result` or `resultRef` must be present. */
     result?: TerminalResult;
-    /**
-     * Path to a dynamic terminal result stored in process state (e.g. `$.context.facts.myResult`).
-     * The value at this path must be a JSON-safe object with `status` and `outcome` fields,
-     * and `status` must match the step subtype.
-     * Exactly one of `result` or `resultRef` must be present.
-     */
     resultRef?: PathRef;
 }
-export type ProcessStepDefinition = ExecutableProcessStepDefinition;
-export type ControlStepDefinition = RouteStepDefinition | SwitchStepDefinition;
-export type StepDefinition = ProcessStepDefinition | ControlStepDefinition | EffectStepDefinition | WaitStepDefinition | TerminalStepDefinition;
+export type StepDefinition = DataProcessStepDefinition | RouteStepDefinition | EffectStepDefinition | WaitStepDefinition | TerminalStepDefinition;

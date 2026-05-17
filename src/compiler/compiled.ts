@@ -1,11 +1,10 @@
 import type {
+  DataProcessStepDefinition,
   EffectStepDefinition,
-  ExecutableProcessStepDefinition,
   FlowDefinition,
   RouteStepDefinition,
   StepDefinition,
   StepId,
-  SwitchStepDefinition,
   TerminalStepDefinition,
   WaitStepDefinition,
 } from '../dsl/types.js';
@@ -25,11 +24,11 @@ export interface PreparedFlowInternal extends PreparedFlow {
   readonly description?: string;
 }
 
-export type PreparedExecutableProcessStep = ExecutableProcessStepDefinition;
+// Flow 5 prepared step types
+export type PreparedDataProcessStep = DataProcessStepDefinition;
 export type PreparedRouteStep = RouteStepDefinition;
-export type PreparedSwitchStep = SwitchStepDefinition;
-export type PreparedProcessStep = PreparedExecutableProcessStep;
-export type PreparedControlStep = PreparedRouteStep | PreparedSwitchStep;
+export type PreparedProcessStep = PreparedDataProcessStep;
+export type PreparedControlStep = PreparedRouteStep;
 export type PreparedEffectStep = EffectStepDefinition;
 export type PreparedWaitStep = WaitStepDefinition;
 export type PreparedTerminalStep = TerminalStepDefinition;
@@ -48,7 +47,7 @@ export function normalizeSteps(steps: Record<StepId, StepDefinition>): Record<St
   return normalized;
 }
 
-export function createPreparedFlow(flow: FlowDefinition): PreparedFlow {
+export function createPreparedFlow(flow: FlowDefinition, _options?: unknown): PreparedFlow {
   const prepared: PreparedFlowInternal = {
     id: flow.id,
     version: flow.version,
@@ -59,7 +58,6 @@ export function createPreparedFlow(flow: FlowDefinition): PreparedFlow {
     ...(flow.title !== undefined ? { title: flow.title } : {}),
     ...(flow.description !== undefined ? { description: flow.description } : {}),
   };
-
   return deepFreeze(prepared) as PreparedFlow;
 }
 

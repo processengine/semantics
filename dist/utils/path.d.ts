@@ -1,4 +1,3 @@
-import type { InputRef, InputRefObject } from '../dsl/types.js';
 export type PathSegment = string | number;
 export declare function parsePath(path: string): PathSegment[] | null;
 export declare function isValidPath(path: unknown): path is string;
@@ -9,6 +8,6 @@ export declare function getPath(target: unknown, path: string): {
     value: unknown;
 };
 export declare function setPath<T extends Record<string, unknown>>(target: T, path: string, value: unknown): T;
-export declare function resolveInput(target: unknown, inputRef: InputRef): unknown;
-export declare function isPathObject(value: unknown): value is InputRefObject;
+export declare function resolveInput(target: unknown, inputRef: string): unknown;
+export declare function isPathObject(value: unknown): boolean;
 export declare function isIdentifierSegment(segment: string): boolean;
