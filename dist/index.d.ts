@@ -5,7 +5,7 @@ export { prepareFlow, validateFlow, type ValidationResult, type ValidationIssue 
 export { XCompileError, XRuntimeError } from './errors/index.js';
 export type { FlowCompileCode, FlowErrorCode, FlowRuntimeCode, FlowValidationCode } from './errors/index.js';
 export { formatValidationIssues, formatRuntimeError } from './formatters.js';
-export { apply, createProcessState, plan, reduce, resume } from './runtime/index.js';
-export type { CreateProcessStateParams, DataflowOutput, DataflowWrite, EffectResult, FlowTraceMode, NormalizedDataProcessStep, NormalizedEffectStep, NormalizedProcessStep, NormalizedControlStep, NormalizedRouteStep, NormalizedStep, NormalizedTerminalStep, NormalizedWaitStep, ProcessContext, ProcessDataContext, ProcessHistoryEntry, ProcessState, ProcessStatus, StepRuntimeState, WaitResult, } from './runtime/types.js';
+export { FLOW5_STATE_VERSION, apply, createProcessState, plan, reduce, resume } from './runtime/index.js';
+export type { CreateProcessStateParams, DataflowOutput, DataflowWrite, EffectResult, ResumeEvent, FlowTraceMode, NormalizedDataProcessStep, NormalizedEffectStep, NormalizedProcessStep, NormalizedControlStep, NormalizedRouteStep, NormalizedStep, NormalizedTerminalStep, NormalizedWaitStep, ProcessDataContext, ProcessState, ProcessStatus, TimelineEntry, StepExecutionRecord, StepRuntimeState, WaitResult, } from './runtime/types.js';
 export { createFlowTrace, formatFlowTrace } from './trace.js';
 export type { BasicFlowTraceEntry, FlowTraceEntry, VerboseFlowTraceEntry } from './trace.js';

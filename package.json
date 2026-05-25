@@ -1,6 +1,6 @@
 {
   "name": "@processengine/semantics",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Flow 5 process semantics for ProcessEngine. Validates, prepares and executes Flow 5 DSL: PROCESS/DATA, CONTROL/ROUTE, EFFECT, WAIT, TERMINAL.",
   "type": "module",
   "main": "./dist/index.js",
@@ -53,8 +53,9 @@
     "build": "tsc -p tsconfig.json && mkdir -p dist/schema && cp src/schema/flow.schema.json dist/schema/flow.schema.json",
     "test": "npm run build && vitest run",
     "bench": "node benchmarks/run.mjs",
-    "check": "npm test",
-    "release:check": "npm test && npm run test:pack",
+    "check:artifacts": "node scripts/check-clean-artifacts.mjs",
+    "check": "npm run check:artifacts && npm test",
+    "release:check": "npm run check:artifacts && npm test && npm run test:pack",
     "prepublishOnly": "echo 'Publish only via GitHub Actions.' && exit 1",
     "version": "git add CHANGELOG.md package-lock.json package.json",
     "test:pack": "node scripts/pack-smoke.mjs"

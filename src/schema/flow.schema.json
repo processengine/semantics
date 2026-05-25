@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://processengine.dev/schemas/flow5-2.0.0.schema.json",
-  "title": "@processengine/semantics v2.0.0 — Flow 5 FlowDefinition",
-  "description": "JSON Schema for Flow 5 DSL artifacts. PROCESS/DATA replaces PROCESS/RULES/MAPPINGS/DECISIONS. CONTROL/ROUTE replaces CONTROL/SWITCH. context.data.* replaces context.facts/decisions/checks.",
+  "$id": "https://processengine.dev/schemas/flow5-3.0.0.schema.json",
+  "title": "@processengine/semantics v3.0.0 — Flow 5 FlowDefinition",
+  "description": "JSON Schema for Flow 5 DSL artifacts on State v2. PROCESS/DATA replaces PROCESS/RULES/MAPPINGS/DECISIONS. CONTROL/ROUTE replaces CONTROL/SWITCH. Runtime state uses root input/data/steps/timeline/result, not context/history.",
   "type": "object",
   "required": ["id", "version", "title", "description", "entryStepId", "steps"],
   "additionalProperties": false,
@@ -63,13 +63,13 @@
         "title": { "type": "string", "minLength": 1 },
         "description": { "type": "string", "minLength": 1 },
         "metadata": { "$ref": "#/$defs/StepMetadata" },
-        "ref": { "type": "string", "minLength": 1, "description": "PathRef to scalar in process state. Missing -> FLOW_ROUTE_REF_NOT_RESOLVED. Object/array -> FLOW_ROUTE_REF_NOT_SCALAR." },
+        "ref": { "type": "string", "minLength": 1, "pattern": "^\\$\\.data\\.", "description": "PathRef to scalar in State v2 data. Missing -> FLOW_ROUTE_REF_NOT_RESOLVED. Object/array -> FLOW_ROUTE_REF_NOT_SCALAR." },
         "cases": { "type": "object", "minProperties": 1, "additionalProperties": { "type": "string", "minLength": 1 } },
         "defaultNextStepId": { "type": "string", "minLength": 1 }
       }
     },
     "EffectStep": {
-      "description": "EFFECT — asynchronous external call (COMMAND, CALL) or subflow delegation (SUBFLOW). onErrorStepId is required.",
+      "description": "EFFECT — COMMAND and SUBFLOW may start async lifecycle through WAIT. CALL is synchronous and must not transition to WAIT. onErrorStepId is required.",
       "type": "object",
       "required": ["id", "type", "subtype", "title", "description", "operationId", "inputRef", "nextStepId", "onErrorStepId"],
       "additionalProperties": false,
@@ -81,7 +81,7 @@
         "description": { "type": "string", "minLength": 1 },
         "metadata": { "$ref": "#/$defs/StepMetadata" },
         "operationId": { "type": "string", "minLength": 1 },
-        "inputRef": { "type": "string", "minLength": 1, "description": "String PathRef only. Object inputRef was removed in Flow 5." },
+        "inputRef": { "type": "string", "minLength": 1, "pattern": "^\\$\\.(input|data)(\\.|$)", "description": "String PathRef only. Object inputRef was removed in Flow 5. EFFECT input must read from State v2 input or data." },
         "nextStepId": { "type": "string", "minLength": 1 },
         "onErrorStepId": { "type": "string", "minLength": 1, "description": "Required. External failure is a lifecycle outcome." },
         "onTimeoutStepId": { "type": "string", "minLength": 1 },
@@ -91,7 +91,15 @@
       "allOf": [
         {
           "if": { "properties": { "subtype": { "const": "SUBFLOW" } }, "required": ["subtype"] },
-          "then": { "required": ["flowId", "flowVersion"] }
+          "then": { "required": ["flowId", "flowVersion"] },
+          "else": {
+            "not": {
+              "anyOf": [
+                { "required": ["flowId"] },
+                { "required": ["flowVersion"] }
+              ]
+            }
+          }
         }
       ]
     },
@@ -114,7 +122,7 @@
       }
     },
     "TerminalStep": {
-      "description": "TERMINAL — COMPLETE or FAIL. result.status must match subtype. resultRef must point into $.context.data.results.*",
+      "description": "TERMINAL — COMPLETE or FAIL. result.status must match subtype. resultRef must point into $.data.results.*",
       "type": "object",
       "required": ["id", "type", "subtype", "title", "description"],
       "additionalProperties": false,
@@ -134,7 +142,7 @@
           },
           "additionalProperties": true
         },
-        "resultRef": { "type": "string", "pattern": "^\\$\\.context\\.data\\.results\\.", "description": "Must start with $.context.data.results." }
+        "resultRef": { "type": "string", "pattern": "^\\$\\.data\\.results\\.", "description": "Must start with $.data.results." }
       },
       "allOf": [
         {

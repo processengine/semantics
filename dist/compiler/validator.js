@@ -90,6 +90,9 @@ function validateRouteStep(step, path, stepIds, issues) {
     if (!isNonEmptyString(step.ref)) {
         issues.push(issue('FLOW_ROUTE_REF_MISSING', `CONTROL/ROUTE step "${step.id}" must have a non-empty "ref"`, `${path}.ref`));
     }
+    else if (!step.ref.startsWith('$.data.')) {
+        issues.push(issue('FLOW_ROUTE_REF_INVALID', `CONTROL/ROUTE step "${step.id}" ref must read from State v2 $.data.*, not "${step.ref}"`, `${path}.ref`));
+    }
     if (!isRecord(step.cases) || Object.keys(step.cases).length === 0) {
         issues.push(issue('FLOW_ROUTE_CASES_MISSING', `CONTROL/ROUTE step "${step.id}" must have at least one case`, `${path}.cases`));
     }
@@ -118,6 +121,9 @@ function validateEffectStep(step, path, stepIds, issues) {
     }
     else if (!isNonEmptyString(step.inputRef)) {
         issues.push(issue('FLOW_EFFECT_INPUT_MISSING', `EFFECT step "${step.id}" must have a non-empty inputRef`, `${path}.inputRef`));
+    }
+    else if (!(step.inputRef === '$.input' || step.inputRef.startsWith('$.input.') || step.inputRef === '$.data' || step.inputRef.startsWith('$.data.'))) {
+        issues.push(issue('FLOW_EFFECT_INPUT_INVALID', `EFFECT step "${step.id}" inputRef must read from $.input.* or $.data.* in State v2`, `${path}.inputRef`));
     }
     if (!isNonEmptyString(step.nextStepId)) {
         issues.push(issue('FLOW_STEP_NEXT_MISSING', `EFFECT step "${step.id}" must have nextStepId`, `${path}.nextStepId`));
@@ -157,6 +163,12 @@ function validateWaitStep(step, path, stepIds, allSteps, issues) {
         if (sourceStep && sourceStep['type'] !== 'EFFECT') {
             issues.push(issue('FLOW_WAIT_SOURCE_NOT_EFFECT', `WAIT step "${step.id}" sourceStepId must reference an EFFECT step, but "${step.sourceStepId}" is type "${sourceStep['type']}"`, `${path}.sourceStepId`));
         }
+        else if (sourceStep && sourceStep['nextStepId'] !== step.id) {
+            issues.push(issue('FLOW_WAIT_SOURCE_TRANSITION_MISMATCH', `WAIT step "${step.id}" sourceStepId "${step.sourceStepId}" must point to this WAIT through nextStepId`, `${path}.sourceStepId`));
+        }
+        if (sourceStep && sourceStep['type'] === 'EFFECT' && sourceStep['subtype'] === 'CALL') {
+            issues.push(issue('FLOW_CALL_WAIT_UNSUPPORTED', `EFFECT/CALL step "${step.sourceStepId}" is synchronous and must not wait through WAIT step "${step.id}". Use COMMAND or SUBFLOW for async lifecycle.`, `steps.${step.sourceStepId}.subtype`));
+        }
         if (step.sourceStepId === step.id) {
             issues.push(issue('FLOW_WAIT_SOURCE_NOT_EFFECT', `WAIT step "${step.id}" sourceStepId must not reference itself`, `${path}.sourceStepId`));
         }
@@ -193,8 +205,8 @@ function validateTerminalStep(step, path, issues) {
         issues.push(issue('FLOW_TERMINAL_RESULT_MISSING', `TERMINAL step "${step.id}" must have either result or resultRef`, `${path}.result`));
     }
     if (hasRef) {
-        if (typeof step.resultRef !== 'string' || !step.resultRef.startsWith('$.context.data.results.')) {
-            issues.push(issue('FLOW_TERMINAL_RESULTREF_INVALID', `TERMINAL step "${step.id}" resultRef must start with "$.context.data.results."`, `${path}.resultRef`));
+        if (typeof step.resultRef !== 'string' || !step.resultRef.startsWith('$.data.results.')) {
+            issues.push(issue('FLOW_TERMINAL_RESULTREF_INVALID', `TERMINAL step "${step.id}" resultRef must start with "$.data.results."`, `${path}.resultRef`));
         }
     }
     if (hasResult && step.result) {
@@ -263,6 +275,112 @@ function validateStep(step, path, stepIds, allSteps, issues) {
             issues.push(issue('FLOW_INVALID_TYPE', `Unknown step type: "${(s)['type']}"`, path));
     }
 }
+function transitionTargets(step) {
+    const targets = [];
+    const add = (value) => {
+        if (isNonEmptyString(value))
+            targets.push(value);
+    };
+    switch (step['type']) {
+        case 'PROCESS':
+            add(step['nextStepId']);
+            break;
+        case 'CONTROL':
+            for (const targetId of Object.values(isRecord(step['cases']) ? step['cases'] : {}))
+                add(targetId);
+            add(step['defaultNextStepId']);
+            break;
+        case 'EFFECT':
+            add(step['nextStepId']);
+            add(step['onErrorStepId']);
+            add(step['onTimeoutStepId']);
+            break;
+        case 'WAIT':
+            add(step['nextStepId']);
+            add(step['onErrorStepId']);
+            add(step['onTimeoutStepId']);
+            break;
+        default:
+            break;
+    }
+    return targets;
+}
+function validateGraphIntegrity(flow, stepIds, allSteps, issues) {
+    const graph = new Map();
+    const terminalIds = new Set();
+    for (const [stepId, step] of Object.entries(allSteps)) {
+        if (!isRecord(step))
+            continue;
+        if (step['type'] === 'TERMINAL')
+            terminalIds.add(stepId);
+        const targets = transitionTargets(step).filter((targetId) => stepIds.has(targetId));
+        graph.set(stepId, targets);
+        for (const targetId of targets) {
+            if (targetId === stepId) {
+                issues.push(issue('FLOW_SELF_LOOP_FORBIDDEN', `Step "${stepId}" must not transition to itself`, `steps.${stepId}`));
+            }
+        }
+        if (step['type'] === 'EFFECT' && step['subtype'] === 'CALL' && isNonEmptyString(step['nextStepId'])) {
+            const target = allSteps[step['nextStepId']];
+            if (target?.['type'] === 'WAIT') {
+                issues.push(issue('FLOW_CALL_WAIT_UNSUPPORTED', `EFFECT/CALL step "${stepId}" is synchronous and must not transition to WAIT step "${step['nextStepId']}". Use COMMAND or SUBFLOW for async lifecycle.`, `steps.${stepId}.nextStepId`));
+            }
+        }
+    }
+    if (terminalIds.size === 0) {
+        issues.push(issue('FLOW_TERMINAL_MISSING', 'Flow must contain at least one TERMINAL step reachable from entryStepId', 'steps'));
+    }
+    const reachable = new Set();
+    if (isNonEmptyString(flow.entryStepId) && stepIds.has(flow.entryStepId)) {
+        const queue = [flow.entryStepId];
+        while (queue.length > 0) {
+            const current = queue.shift();
+            if (reachable.has(current))
+                continue;
+            reachable.add(current);
+            for (const targetId of graph.get(current) ?? []) {
+                if (!reachable.has(targetId))
+                    queue.push(targetId);
+            }
+        }
+    }
+    for (const stepId of stepIds) {
+        if (!reachable.has(stepId)) {
+            issues.push(issue('FLOW_UNREACHABLE_STEP', `Step "${stepId}" is not reachable from entryStepId "${flow.entryStepId}"`, `steps.${stepId}`));
+        }
+    }
+    if (terminalIds.size > 0 && ![...terminalIds].some((stepId) => reachable.has(stepId))) {
+        issues.push(issue('FLOW_TERMINAL_NOT_REACHABLE', `Flow must have at least one TERMINAL step reachable from entryStepId "${flow.entryStepId}"`, 'entryStepId'));
+    }
+    const colors = new Map();
+    const stack = [];
+    const reportedCycles = new Set();
+    const visit = (stepId) => {
+        const color = colors.get(stepId);
+        if (color === 'visited')
+            return;
+        if (color === 'visiting') {
+            const start = stack.indexOf(stepId);
+            const cycle = start >= 0 ? [...stack.slice(start), stepId] : [stepId, stepId];
+            const key = cycle.join('>');
+            if (!reportedCycles.has(key)) {
+                reportedCycles.add(key);
+                issues.push(issue('FLOW_CYCLE_UNSUPPORTED', `Flow graph cycles are not supported: ${cycle.join(' -> ')}`, `steps.${stepId}`));
+            }
+            return;
+        }
+        colors.set(stepId, 'visiting');
+        stack.push(stepId);
+        for (const targetId of graph.get(stepId) ?? []) {
+            if (targetId !== stepId)
+                visit(targetId);
+        }
+        stack.pop();
+        colors.set(stepId, 'visited');
+    };
+    for (const stepId of stepIds)
+        visit(stepId);
+}
 export function validateFlow(source, options) {
     const issues = [];
     if (!isRecord(source)) {
@@ -318,6 +436,7 @@ export function validateFlow(source, options) {
             continue;
         validateStep(step, `steps.${id}`, stepIds, allSteps, issues);
     }
+    validateGraphIntegrity(flow, stepIds, allSteps, issues);
     return { ok: issues.length === 0, issues };
 }
 export function prepareFlow(source, options) {

@@ -28,7 +28,7 @@ for (const name of readdirSync(join(installedRoot, 'examples')).filter((x) => x.
 }
 
 const script = `
-import { validateFlow, prepareFlow, createProcessState, plan, reduce, XCompileError, XRuntimeError } from '@processengine/semantics';
+import { validateFlow, prepareFlow, createProcessState, plan, reduce, apply, resume, XCompileError, XRuntimeError } from '@processengine/semantics';
 
 // ── Smoke 1: valid Flow 5 flow ────────────────────────────────────────────────
 const flowDef = {
@@ -47,9 +47,11 @@ if (!v.ok) throw new Error('validate failed: ' + JSON.stringify(v.issues));
 const flow = prepareFlow(flowDef);
 const state = createProcessState({ flow, processId: 'smoke-001' });
 
-// ── Smoke 2: context.data.* structure ────────────────────────────────────────
-if (!state.context.data?.facts) throw new Error('context.data.facts missing');
-if (state.context.facts !== undefined) throw new Error('old context.facts must not exist');
+// ── Smoke 2: State v2 root data structure ───────────────────────────────────
+if (state.stateVersion !== 'flow5-state-v2') throw new Error('stateVersion wrong: ' + state.stateVersion);
+if (!state.data?.facts) throw new Error('data.facts missing');
+if (state.context !== undefined) throw new Error('old context must not exist');
+if (state.history !== undefined) throw new Error('old history must not exist');
 if (state.flowId !== 'flow.smoke') throw new Error('flowId wrong: ' + state.flowId);
 
 // ── Smoke 3: plan(DATA) — artefactId, no input ───────────────────────────────
@@ -60,15 +62,15 @@ if (dataStep.artefactId !== 'dataflow.smoke') throw new Error('wrong artefactId'
 
 // ── Smoke 4: reduce(DATA) applies writes ─────────────────────────────────────
 const nextState = reduce(dataStep, state, {
-  writes: [{ ref: '$.context.data.decisions.x', value: { outcome: 'DONE' }, itemId: 'i1' }],
+  writes: [{ ref: '$.data.decisions.x', value: { outcome: 'DONE' }, itemId: 'i1' }],
 });
-if (nextState.currentStepId !== 'finish') throw new Error('wrong next step: ' + nextState.currentStepId);
-if (!nextState.context.data.decisions.x) throw new Error('write not applied');
+if (nextState.current.stepId !== 'finish') throw new Error('wrong next step: ' + nextState.current.stepId);
+if (!nextState.data.decisions.x) throw new Error('write not applied');
 if (nextState.status !== 'COMPLETE') throw new Error('TERMINAL not reached: ' + nextState.status);
 
-// ── Smoke 5: reduce(DATA) rejects writes outside $.context.data.* ────────────
+// ── Smoke 5: reduce(DATA) rejects writes outside $.data.* ───────────────────
 let threw = false;
-try { reduce(dataStep, state, { writes: [{ ref: '$.context.facts.x', value: 1, itemId: 'bad' }] }); }
+try { reduce(dataStep, state, { writes: [{ ref: '$.input.x', value: 1, itemId: 'bad' }] }); }
 catch { threw = true; }
 if (!threw) throw new Error('forbidden write should throw');
 
@@ -78,7 +80,7 @@ const routeFlow = prepareFlow({
   steps: {
     ...flowDef.steps,
     evaluate: { ...flowDef.steps.evaluate, nextStepId: 'route' },
-    route: { id: 'route', type: 'CONTROL', subtype: 'ROUTE', title: 'Route', description: 'Routes.', ref: '$.context.data.decisions.y.outcome', cases: { A: 'finish' }, defaultNextStepId: 'finish' },
+    route: { id: 'route', type: 'CONTROL', subtype: 'ROUTE', title: 'Route', description: 'Routes.', ref: '$.data.decisions.y.outcome', cases: { A: 'finish' }, defaultNextStepId: 'finish' },
   },
 });
 const routeState = createProcessState({ flow: routeFlow, processId: 'smoke-002' });
@@ -102,7 +104,7 @@ const vEffect = validateFlow({
   steps: {
     ...flowDef.steps,
     evaluate: { ...flowDef.steps.evaluate, nextStepId: 'call_abs' },
-    call_abs: { id: 'call_abs', type: 'EFFECT', subtype: 'CALL', title: 'Call', description: 'Calls ABS.', operationId: 'abs.find', inputRef: '$.context.input.application', nextStepId: 'finish' },
+    call_abs: { id: 'call_abs', type: 'EFFECT', subtype: 'CALL', title: 'Call', description: 'Calls ABS.', operationId: 'abs.find', inputRef: '$.input.application', nextStepId: 'finish' },
     // no onErrorStepId
   },
 });
@@ -114,12 +116,53 @@ const vTransition = validateFlow({ ...flowDef, steps: { ...flowDef.steps, evalua
 if (vTransition.ok) throw new Error('broken transition should be rejected');
 if (!vTransition.issues.some(i => i.code === 'FLOW_TRANSITION_NOT_FOUND')) throw new Error('wrong code for broken transition');
 
-// ── Smoke 10: XCompileError on invalid flow ───────────────────────────────────
+// ── Smoke 10: graph integrity validation ──────────────────────────────────────
+const vOrphan = validateFlow({
+  ...flowDef,
+  steps: {
+    ...flowDef.steps,
+    orphan: { id: 'orphan', type: 'PROCESS', subtype: 'DATA', title: 'Orphan', description: 'Unreachable.', artefactId: 'dataflow.orphan', nextStepId: 'finish' },
+  },
+});
+if (vOrphan.ok) throw new Error('orphan step should be rejected');
+if (!vOrphan.issues.some(i => i.code === 'FLOW_UNREACHABLE_STEP')) throw new Error('wrong code for orphan step');
+
+const vNoTerminal = validateFlow({
+  ...flowDef,
+  steps: {
+    evaluate: { ...flowDef.steps.evaluate, nextStepId: 'evaluate' },
+  },
+});
+if (vNoTerminal.ok) throw new Error('flow without TERMINAL should be rejected');
+if (!vNoTerminal.issues.some(i => i.code === 'FLOW_TERMINAL_MISSING')) throw new Error('wrong code for missing terminal');
+
+// ── Smoke 11: resume requestId correlation ───────────────────────────────────
+const effectFlow = prepareFlow({
+  id: 'flow.smoke.effect', version: '1.0.0',
+  title: 'Effect smoke', description: 'Effect smoke.',
+  entryStepId: 'call',
+  steps: {
+    call: { id: 'call', type: 'EFFECT', subtype: 'COMMAND', title: 'Call', description: 'Calls.', operationId: 'op', inputRef: '$.input', nextStepId: 'wait', onErrorStepId: 'fail' },
+    wait: { id: 'wait', type: 'WAIT', subtype: 'MESSAGE', title: 'Wait', description: 'Waits.', sourceStepId: 'call', nextStepId: 'finish', onErrorStepId: 'fail', onTimeoutStepId: 'fail' },
+    finish: { id: 'finish', type: 'TERMINAL', subtype: 'COMPLETE', title: 'Finish', description: 'Done.', result: { status: 'COMPLETE', outcome: 'DONE' } },
+    fail: { id: 'fail', type: 'TERMINAL', subtype: 'FAIL', title: 'Fail', description: 'Failed.', result: { status: 'FAIL', outcome: 'FAIL' } },
+  },
+});
+let effectState = createProcessState({ flow: effectFlow, processId: 'smoke-effect', input: {} });
+effectState = apply(effectFlow, effectState, 'call', { requestId: 'req-1', result: { accepted: true } });
+try {
+  resume(effectFlow, effectState, 'wait', { requestId: 'req-2', result: { status: 'SUCCESS' } });
+  throw new Error('requestId mismatch should throw');
+} catch (e) {
+  if (e.code !== 'FLOW_RESUME_REQUEST_ID_MISMATCH') throw new Error('wrong requestId mismatch code: ' + e.code);
+}
+
+// ── Smoke 12: XCompileError on invalid flow ───────────────────────────────────
 try { prepareFlow({ ...flowDef, id: '' }); throw new Error('should throw'); }
 catch (e) { if (!(e instanceof XCompileError)) throw new Error('wrong error class: ' + e?.constructor?.name); }
 
 
-// ── Smoke 11: all packaged examples validate as Flow 5 ───────────────────────
+// ── Smoke 13: all packaged examples validate as Flow 5 ───────────────────────
 import { readFileSync, readdirSync } from 'node:fs';
 import { join as joinPath } from 'node:path';
 const examplesDir = joinPath(process.cwd(), 'node_modules', '@processengine', 'semantics', 'examples');

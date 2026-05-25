@@ -2,19 +2,21 @@
 
 Flow 5 process semantics for ProcessEngine.
 
-Validates, prepares and executes flow definitions. Manages process state transitions according to the Flow 5 model.
+The package validates Flow 5 artifacts, prepares them for runtime, and applies lifecycle transitions over State v2.
 
-## Flow 5 model
+## Flow 5 Model
 
+```text
+PROCESS/DATA  -> synchronous data assessment through @processengine/dataflows
+CONTROL/ROUTE -> routing by a scalar from $.data.*
+EFFECT        -> external COMMAND/SUBFLOW async lifecycle or synchronous CALL
+WAIT/MESSAGE  -> wait for an EFFECT result
+TERMINAL      -> COMPLETE or FAIL
 ```
-PROCESS/DATA  — synchronous data processing via dataflow artifact
-CONTROL/ROUTE — routing by any scalar value from state
-EFFECT        — external async call (COMMAND, CALL, SUBFLOW)
-WAIT/MESSAGE  — waiting for async response
-TERMINAL      — COMPLETE or FAIL
-```
 
-**Removed from Flow 5:** `PROCESS/RULES`, `PROCESS/MAPPINGS`, `PROCESS/DECISIONS`, `CONTROL/SWITCH`.
+Removed from Flow 5: `PROCESS/RULES`, `PROCESS/MAPPINGS`, `PROCESS/DECISIONS`, `CONTROL/SWITCH`, `factRef`.
+
+`CALL` is synchronous: it must complete in `apply(...)` and must not transition to `WAIT/MESSAGE`. Use `COMMAND` or `SUBFLOW` for asynchronous external lifecycle.
 
 ## Install
 
@@ -22,7 +24,7 @@ TERMINAL      — COMPLETE or FAIL
 npm install @processengine/semantics
 ```
 
-## Quick start
+## Quick Start
 
 ```js
 import { validateFlow, prepareFlow, createProcessState, plan, reduce } from '@processengine/semantics';
@@ -35,80 +37,87 @@ const flowDef = {
   entryStepId: 'evaluate',
   steps: {
     evaluate: {
-      id: 'evaluate', type: 'PROCESS', subtype: 'DATA',
-      title: 'Evaluate', description: 'Runs a dataflow artifact.',
+      id: 'evaluate',
+      type: 'PROCESS',
+      subtype: 'DATA',
+      title: 'Evaluate',
+      description: 'Runs a dataflow artifact.',
       artefactId: 'dataflow.example.evaluate',
-      nextStepId: 'finish',
+      nextStepId: 'route',
+    },
+    route: {
+      id: 'route',
+      type: 'CONTROL',
+      subtype: 'ROUTE',
+      title: 'Route',
+      description: 'Routes by dataflow decision.',
+      ref: '$.data.decisions.x.outcome',
+      cases: { DONE: 'finish' },
+      defaultNextStepId: 'finish',
     },
     finish: {
-      id: 'finish', type: 'TERMINAL', subtype: 'COMPLETE',
-      title: 'Finish', description: 'Process complete.',
-      result: { status: 'COMPLETE', outcome: 'DONE' },
+      id: 'finish',
+      type: 'TERMINAL',
+      subtype: 'COMPLETE',
+      title: 'Finish',
+      description: 'Process complete.',
+      resultRef: '$.data.results.done',
     },
   },
 };
 
-// 1. Validate
-const v = validateFlow(flowDef);
-if (!v.ok) throw new Error(JSON.stringify(v.issues));
+const validation = validateFlow(flowDef);
+if (!validation.ok) throw new Error(JSON.stringify(validation.issues));
 
-// 2. Prepare once
 const flow = prepareFlow(flowDef);
+let state = createProcessState({ flow, processId: 'proc-001', input: { x: 1 } });
 
-// 3. Create process state
-const state = createProcessState({ flow, processId: 'proc-001', input: { x: 1 } });
-// state.context.data.{facts,decisions,checks,payloads,results} are all available
-
-// 4. Orchestrator loop
 const dataStep = plan(flow, state);
-// dataStep.artefactId → pass to @processengine/dataflows
-// dataStep contains NO input — orchestrator does not know about dataflow internals
-
-const nextState = reduce(dataStep, state, {
-  // DataflowOutput from @processengine/dataflows
+state = reduce(dataStep, state, {
   writes: [
-    { ref: '$.context.data.decisions.x', value: { outcome: 'DONE' }, itemId: 'decide' },
+    { ref: '$.data.decisions.x', value: { outcome: 'DONE' }, itemId: 'decide' },
+    { ref: '$.data.results.done', value: { status: 'COMPLETE', outcome: 'DONE' }, itemId: 'result' },
   ],
 });
-// nextState.currentStepId === 'finish', status === 'COMPLETE'
+
+const routeStep = plan(flow, state);
+state = reduce(routeStep, state, null);
 ```
 
-## Orchestrator contract
+## State v2 Shape
 
-```
-orchestrator:
-  step = plan(flow, state)           // get current step description
-  output = executeStep(step, state)  // call appropriate runtime (dataflows, etc.)
-  state = reduce(step, state, output)// apply output, advance to next step
-  persist(state)
-```
-
-## ProcessContext
-
-```
-context.input             — process input
-context.data.payloads.*   — intermediate payloads
-context.data.facts.*      — decision-ready facts
-context.data.decisions.*  — decision outcomes
-context.data.checks.*     — rule check results
-context.data.results.*    — terminal results (read by TERMINAL.resultRef)
-context.effects.*         — effect responses
+```text
+state.input             -> process input
+state.data.payloads.*   -> intermediate payloads
+state.data.facts.*      -> decision-ready facts
+state.data.decisions.*  -> decision outcomes
+state.data.checks.*     -> rule check results
+state.data.results.*    -> terminal results
+state.steps.*           -> step execution records
+state.timeline[]        -> minimal execution timeline
 ```
 
-## CONTROL/ROUTE
+There is no persisted `context`, `history`, `context.effects`, or runtime `waitResult` projection in State v2. Domain payload fields named `waitResult` inside `input` or `data` are allowed. Even with `trace: 'off'`, `PROCESS/DATA` write values stay in `dataflow.writes[]` as the audit projection.
 
-ROUTE reads a scalar from state by `ref` path:
+## EFFECT / WAIT Results
 
-- String/number/boolean/null: matched against `cases` keys
-- Missing ref: **runtime error** `FLOW_ROUTE_REF_NOT_RESOLVED` (missing ref is a broken dataflow contract, not a business "no match")
-- Object/array: **runtime error** `FLOW_ROUTE_REF_NOT_SCALAR`
-- No matching case: `defaultNextStepId`
+EFFECT executions are stored under `state.steps.<effectStepId>.executions[]`.
+
+The virtual path segment `latest` resolves through `latestExecutionId`:
+
+```text
+$.steps.send_client.latest.command.result
+$.steps.run_child.latest.subflow.result
+```
+
+Only the first `PROCESS/DATA` after a `WAIT/MESSAGE` should read these paths. That bridge DATA step normalizes external response data into `$.data.*`.
 
 ## TERMINAL.resultRef
 
-Must point into `$.context.data.results.*`. Written there by a PROCESS/DATA step before the terminal transition.
+`TERMINAL.resultRef` must point into `$.data.results.*`.
 
-## See also
+## See Also
 
-- `@processengine/dataflows` — executes dataflow artifacts for PROCESS/DATA steps
-- `examples/` — canonical Flow 5 flow examples
+- `SPEC.md` and `SPEC_RU.md` for the normative contract.
+- `@processengine/dataflows` for `PROCESS/DATA` execution.
+- `examples/` for canonical Flow 5 artifacts.

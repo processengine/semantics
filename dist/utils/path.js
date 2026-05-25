@@ -77,7 +77,7 @@ export function isWritablePath(path) {
     const segments = parsePath(path);
     if (!segments || segments.length < 2)
         return false;
-    return segments[0] === 'context' && typeof segments[1] === 'string' && WRITABLE_ZONE_NAMES.has(segments[1]);
+    return typeof segments[0] === 'string' && WRITABLE_ZONE_NAMES.has(segments[0]);
 }
 export function normalizePath(path) {
     const segments = parsePath(path);
@@ -89,7 +89,23 @@ export function normalizePath(path) {
 export function getPath(target, path) {
     const segments = normalizePath(path);
     let current = target;
-    for (const segment of segments) {
+    for (let index = 0; index < segments.length; index += 1) {
+        const segment = segments[index];
+        if (segment === 'latest' && index >= 2 && segments[0] === 'steps') {
+            if (!isRecord(current))
+                return { found: false, value: undefined };
+            const latestExecutionId = current['latestExecutionId'];
+            const executions = current['executions'];
+            if (!Array.isArray(executions))
+                return { found: false, value: undefined };
+            const latest = typeof latestExecutionId === 'string'
+                ? executions.find((execution) => isRecord(execution) && execution['executionId'] === latestExecutionId)
+                : executions[executions.length - 1];
+            if (!latest)
+                return { found: false, value: undefined };
+            current = latest;
+            continue;
+        }
         if (typeof segment === 'number') {
             if (!Array.isArray(current) || segment >= current.length)
                 return { found: false, value: undefined };

@@ -20,7 +20,7 @@
       "subtype": "ROUTE",
       "title": "Выбрать исход валидации",
       "description": "Маршрутизирует по outcome решения из dataflow валидации.",
-      "ref": "$.context.data.decisions.validation.outcome",
+      "ref": "$.data.decisions.validation.outcome",
       "cases": {
         "CONTINUE": "finish_accepted",
         "REJECT_HARD": "finish_rejected"
@@ -33,7 +33,7 @@
       "subtype": "COMPLETE",
       "title": "Завершить: заявка принята",
       "description": "Фиксирует успешный результат регистрации.",
-      "resultRef": "$.context.data.results.registration"
+      "resultRef": "$.data.results.registration"
     },
     "finish_rejected": {
       "id": "finish_rejected",

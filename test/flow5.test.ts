@@ -29,14 +29,14 @@ const base = {
     route: {
       id: 'route', type: 'CONTROL', subtype: 'ROUTE',
       title: 'Маршрутизировать', description: 'Выбирает ветку по исходу dataflow.',
-      ref: '$.context.data.decisions.validation.outcome',
+      ref: '$.data.decisions.validation.outcome',
       cases: { CONTINUE: 'finish_ok', REJECT: 'finish_fail' },
       defaultNextStepId: 'finish_fail',
     },
     finish_ok: {
       id: 'finish_ok', type: 'TERMINAL', subtype: 'COMPLETE',
       title: 'Завершить успешно', description: 'Фиксирует успешный результат.',
-      resultRef: '$.context.data.results.success',
+      resultRef: '$.data.results.success',
     },
     finish_fail: {
       id: 'finish_fail', type: 'TERMINAL', subtype: 'FAIL',
@@ -98,7 +98,7 @@ describe('validateFlow — Flow 5 taxonomy', () => {
 
   it('rejects CONTROL/ROUTE with factRef — renamed to ref in Flow 5', () => {
     const { ref, ...noRef } = base.steps.route as any;
-    const r = validateFlow({ ...base, steps: { ...base.steps, route: { ...noRef, factRef: '$.context.data.decisions.x.outcome' } } });
+    const r = validateFlow({ ...base, steps: { ...base.steps, route: { ...noRef, factRef: '$.data.decisions.x.outcome' } } });
     expect(r.ok).toBe(false);
     expect(r.issues.some(i => i.code === 'FLOW_ROUTE_FACTREF_REMOVED')).toBe(true);
   });
@@ -110,8 +110,8 @@ describe('validateFlow — Flow 5 taxonomy', () => {
     expect(r.issues.some(i => i.code === 'FLOW_ROUTE_REF_MISSING')).toBe(true);
   });
 
-  it('rejects TERMINAL resultRef outside $.context.data.results.*', () => {
-    const r = validateFlow({ ...base, steps: { ...base.steps, finish_ok: { ...base.steps.finish_ok, resultRef: '$.context.facts.result' } } });
+  it('rejects TERMINAL resultRef outside $.data.results.*', () => {
+    const r = validateFlow({ ...base, steps: { ...base.steps, finish_ok: { ...base.steps.finish_ok, resultRef: '$.data.facts.result' } } });
     expect(r.ok).toBe(false);
     expect(r.issues.some(i => i.code === 'FLOW_TERMINAL_RESULTREF_INVALID')).toBe(true);
   });
@@ -144,7 +144,7 @@ describe('validateFlow — Flow 5 taxonomy', () => {
           id: 'call_abs', type: 'EFFECT', subtype: 'CALL',
           title: 'Вызов АБС', description: 'Отправляет запрос в АБС.',
           operationId: 'abs.findClient',
-          inputRef: { a: '$.context.input.application' } as any,
+          inputRef: { a: '$.input.application' } as any,
           nextStepId: 'evaluate',
           onErrorStepId: 'finish_fail',
         },
@@ -178,18 +178,100 @@ describe('validateFlow — transition refs exist', () => {
   });
 });
 
+// ── validateFlow — graph integrity ───────────────────────────────────────────
+
+describe('validateFlow — graph integrity', () => {
+  it('rejects orphan steps that are not reachable from entryStepId', () => {
+    const r = validateFlow({
+      ...base,
+      steps: {
+        ...base.steps,
+        orphan: {
+          id: 'orphan', type: 'PROCESS', subtype: 'DATA',
+          title: 'Orphan', description: 'Unreachable technical step.',
+          artefactId: 'dataflow.test.orphan', nextStepId: 'finish_fail',
+        },
+      },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.issues.some(i => i.code === 'FLOW_UNREACHABLE_STEP' && i.path === 'steps.orphan')).toBe(true);
+  });
+
+  it('rejects flows without any TERMINAL step', () => {
+    const r = validateFlow({
+      ...base,
+      entryStepId: 'evaluate',
+      steps: {
+        evaluate: { ...base.steps.evaluate, nextStepId: 'route' },
+        route: {
+          ...base.steps.route,
+          cases: { CONTINUE: 'evaluate' },
+          defaultNextStepId: 'evaluate',
+        },
+      },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.issues.some(i => i.code === 'FLOW_TERMINAL_MISSING')).toBe(true);
+  });
+
+  it('rejects flows where no TERMINAL is reachable from entryStepId', () => {
+    const r = validateFlow({
+      ...base,
+      steps: {
+        ...base.steps,
+        evaluate: { ...base.steps.evaluate, nextStepId: 'loop' },
+        loop: {
+          id: 'loop', type: 'PROCESS', subtype: 'DATA',
+          title: 'Loop', description: 'Loops forever.',
+          artefactId: 'dataflow.test.loop', nextStepId: 'loop',
+        },
+      },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.issues.some(i => i.code === 'FLOW_TERMINAL_NOT_REACHABLE')).toBe(true);
+    expect(r.issues.some(i => i.code === 'FLOW_SELF_LOOP_FORBIDDEN')).toBe(true);
+  });
+
+  it('rejects self-loop transitions', () => {
+    const r = validateFlow({
+      ...base,
+      steps: { ...base.steps, evaluate: { ...base.steps.evaluate, nextStepId: 'evaluate' } },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.issues.some(i => i.code === 'FLOW_SELF_LOOP_FORBIDDEN')).toBe(true);
+  });
+
+  it('rejects graph cycles while cycle support is outside the Flow 5 runtime scope', () => {
+    const r = validateFlow({
+      ...base,
+      steps: {
+        ...base.steps,
+        evaluate: { ...base.steps.evaluate, nextStepId: 'derive' },
+        derive: {
+          id: 'derive', type: 'PROCESS', subtype: 'DATA',
+          title: 'Derive', description: 'Forms a cycle with evaluate.',
+          artefactId: 'dataflow.test.derive', nextStepId: 'evaluate',
+        },
+      },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.issues.some(i => i.code === 'FLOW_CYCLE_UNSUPPORTED')).toBe(true);
+  });
+});
+
 // ── validateFlow — EFFECT.onErrorStepId required ──────────────────────────────
 
 describe('validateFlow — EFFECT.onErrorStepId required', () => {
   const effectBase = {
     ...base,
+    entryStepId: 'call_abs',
     steps: {
       ...base.steps,
       call_abs: {
         id: 'call_abs', type: 'EFFECT', subtype: 'CALL',
         title: 'Вызов АБС', description: 'Отправляет запрос в АБС.',
         operationId: 'abs.findClient',
-        inputRef: '$.context.input.application',
+        inputRef: '$.input.application',
         nextStepId: 'evaluate',
         onErrorStepId: 'finish_fail',
       },
@@ -214,13 +296,14 @@ describe('validateFlow — EFFECT.onErrorStepId required', () => {
 describe('validateFlow — WAIT.sourceStepId must reference EFFECT', () => {
   const withEffectAndWait = {
     ...base,
+    entryStepId: 'call_abs',
     steps: {
       ...base.steps,
       call_abs: {
-        id: 'call_abs', type: 'EFFECT', subtype: 'CALL',
+        id: 'call_abs', type: 'EFFECT', subtype: 'COMMAND',
         title: 'Вызов АБС', description: 'Запрос в АБС.',
         operationId: 'abs.findClient',
-        inputRef: '$.context.input.application',
+        inputRef: '$.input.application',
         nextStepId: 'wait_abs',
         onErrorStepId: 'finish_fail',
       },
@@ -250,6 +333,30 @@ describe('validateFlow — WAIT.sourceStepId must reference EFFECT', () => {
     expect(r.ok).toBe(false);
     expect(r.issues.some(i => i.code === 'FLOW_WAIT_SOURCE_NOT_EFFECT')).toBe(true);
   });
+
+  it('rejects WAIT whose source EFFECT does not transition to this WAIT', () => {
+    const r = validateFlow({
+      ...withEffectAndWait,
+      steps: {
+        ...withEffectAndWait.steps,
+        call_abs: { ...withEffectAndWait.steps.call_abs, nextStepId: 'evaluate' },
+      },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.issues.some(i => i.code === 'FLOW_WAIT_SOURCE_TRANSITION_MISMATCH')).toBe(true);
+  });
+
+  it('rejects CALL -> WAIT because CALL is synchronous', () => {
+    const r = validateFlow({
+      ...withEffectAndWait,
+      steps: {
+        ...withEffectAndWait.steps,
+        call_abs: { ...withEffectAndWait.steps.call_abs, subtype: 'CALL' },
+      },
+    });
+    expect(r.ok).toBe(false);
+    expect(r.issues.some(i => i.code === 'FLOW_CALL_WAIT_UNSUPPORTED')).toBe(true);
+  });
 });
 
 // ── validateFlow — metadata ───────────────────────────────────────────────────
@@ -267,22 +374,93 @@ describe('validateFlow — metadata validation', () => {
   });
 });
 
+// ── JSON Schema parity ───────────────────────────────────────────────────────
+
+describe('JSON Schema parity with validateFlow', () => {
+  async function schemaAccepts(flow: unknown): Promise<boolean> {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const { default: Ajv2020 } = await import('ajv/dist/2020.js');
+    const schema = JSON.parse(readFileSync(join('dist', 'schema', 'flow.schema.json'), 'utf8'));
+    const ajv = new Ajv2020({ allErrors: true, strict: false });
+    return Boolean(ajv.compile(schema)(flow));
+  }
+
+  it('schema and validateFlow both accept the canonical fixture', async () => {
+    expect(await schemaAccepts(base)).toBe(true);
+    expect(validateFlow(base).ok).toBe(true);
+  });
+
+  it('schema and validateFlow both reject COMMAND with SUBFLOW-only fields', async () => {
+    const flow = {
+      ...base,
+      steps: {
+        ...base.steps,
+        command: {
+          id: 'command', type: 'EFFECT', subtype: 'COMMAND',
+          title: 'Command', description: 'Command.',
+          operationId: 'op', inputRef: '$.input',
+          nextStepId: 'finish_ok', onErrorStepId: 'finish_fail',
+          flowId: 'wrong', flowVersion: '1.0.0',
+        },
+      },
+    };
+    expect(await schemaAccepts(flow)).toBe(false);
+    expect(validateFlow(flow).ok).toBe(false);
+    expect(validateFlow(flow).issues.some(i => i.code === 'FLOW_STEP_FORBIDDEN_FIELD')).toBe(true);
+  });
+
+  it('schema and validateFlow both reject terminal result mixed with resultRef', async () => {
+    const flow = {
+      ...base,
+      steps: {
+        ...base.steps,
+        finish_ok: {
+          ...base.steps.finish_ok,
+          result: { status: 'COMPLETE', outcome: 'OK' },
+        },
+      },
+    };
+    expect(await schemaAccepts(flow)).toBe(false);
+    expect(validateFlow(flow).ok).toBe(false);
+    expect(validateFlow(flow).issues.some(i => i.code === 'FLOW_TERMINAL_RESULT_AMBIGUOUS')).toBe(true);
+  });
+
+  it('schema and validateFlow both reject old context refs', async () => {
+    const flow = {
+      ...base,
+      steps: {
+        ...base.steps,
+        route: {
+          ...base.steps.route,
+          ref: '$.context.data.decisions.validation.outcome',
+        },
+      },
+    };
+    expect(await schemaAccepts(flow)).toBe(false);
+    expect(validateFlow(flow).ok).toBe(false);
+    expect(validateFlow(flow).issues.some(i => i.code === 'FLOW_ROUTE_REF_INVALID')).toBe(true);
+  });
+});
+
 // ── createProcessState ────────────────────────────────────────────────────────
 
 describe('createProcessState', () => {
-  it('creates state with context.data.* — no old context.facts/decisions/checks', () => {
+  it('creates State v2 with root input/data/steps/timeline — no old context/history', () => {
     const flow = prepareFlow(base);
     const state = createProcessState({ flow, processId: 'p-001', input: { application: { x: 1 } } });
-    expect(state.context.data).toBeDefined();
-    expect(state.context.data.facts).toEqual({});
-    expect(state.context.data.decisions).toEqual({});
-    expect(state.context.data.checks).toEqual({});
-    expect(state.context.data.payloads).toEqual({});
-    expect(state.context.data.results).toEqual({});
-    expect(state.context.input).toEqual({ application: { x: 1 } });
-    expect((state.context as any).facts).toBeUndefined();
-    expect((state.context as any).decisions).toBeUndefined();
-    expect((state.context as any).checks).toBeUndefined();
+    expect(state.stateVersion).toBe('flow5-state-v2');
+    expect(state.data).toBeDefined();
+    expect(state.data.facts).toEqual({});
+    expect(state.data.decisions).toEqual({});
+    expect(state.data.checks).toEqual({});
+    expect(state.data.payloads).toEqual({});
+    expect(state.data.results).toEqual({});
+    expect(state.input).toEqual({ application: { x: 1 } });
+    expect(state.steps).toEqual({});
+    expect(state.timeline).toEqual([]);
+    expect((state as any).context).toBeUndefined();
+    expect((state as any).history).toBeUndefined();
     expect(state.flowId).toBe('flow.test');
     expect(state.flowVersion).toBe('1.0.0');
   });
@@ -308,28 +486,28 @@ describe('plan(PROCESS/DATA)', () => {
 // ── reduce(PROCESS/DATA) ──────────────────────────────────────────────────────
 
 describe('reduce(PROCESS/DATA)', () => {
-  it('applies DataflowOutput.writes to context.data.* atomically', () => {
+  it('applies DataflowOutput.writes to $.data.* atomically', () => {
     const flow = prepareFlow(base);
     const state = createProcessState({ flow, processId: 'p-003' });
     const step = plan(flow, state);
 
     const next = reduce(step as any, state, {
       writes: [
-        { ref: '$.context.data.facts.validation', value: { errorCount: 0 }, itemId: 'derive_facts' },
-        { ref: '$.context.data.decisions.validation', value: { outcome: 'CONTINUE', decisionSetId: 'x' }, itemId: 'decide' },
+        { ref: '$.data.facts.validation', value: { errorCount: 0 }, itemId: 'derive_facts' },
+        { ref: '$.data.decisions.validation', value: { outcome: 'CONTINUE', decisionSetId: 'x' }, itemId: 'decide' },
       ],
     });
 
-    expect((next.context.data.facts as any).validation.errorCount).toBe(0);
-    expect((next.context.data.decisions as any).validation.outcome).toBe('CONTINUE');
-    expect(next.currentStepId).toBe('route');
+    expect((next.data.facts as any).validation.errorCount).toBe(0);
+    expect((next.data.decisions as any).validation.outcome).toBe('CONTINUE');
+    expect(next.current.stepId).toBe('route');
   });
 
-  it('rejects writes outside $.context.data.*', () => {
+  it('rejects writes outside $.data.*', () => {
     const flow = prepareFlow(base);
     const state = createProcessState({ flow, processId: 'p-004' });
     const step = plan(flow, state);
-    expect(() => reduce(step as any, state, { writes: [{ ref: '$.context.facts.x', value: 1, itemId: 'bad' }] })).toThrow();
+    expect(() => reduce(step as any, state, { writes: [{ ref: '$.input.x', value: 1, itemId: 'bad' }] })).toThrow();
   });
 
   it('rejects non-array writes', () => {
@@ -343,7 +521,7 @@ describe('reduce(PROCESS/DATA)', () => {
     const flow = prepareFlow(base);
     const state = createProcessState({ flow, processId: 'p-006' });
     const step = plan(flow, state);
-    expect(() => reduce(step as any, state, { writes: [{ ref: '$.context.data.facts.x', value: () => {}, itemId: 'fn' }] })).toThrow();
+    expect(() => reduce(step as any, state, { writes: [{ ref: '$.data.facts.x', value: () => {}, itemId: 'fn' }] })).toThrow();
   });
 });
 
@@ -356,9 +534,9 @@ describe('CONTROL/ROUTE', () => {
     const dataStep = plan(flow, state);
     const writes = decisionOutcome !== undefined
       ? [
-          { ref: '$.context.data.decisions.validation', value: { outcome: decisionOutcome }, itemId: 'decide' },
+          { ref: '$.data.decisions.validation', value: { outcome: decisionOutcome }, itemId: 'decide' },
           // finish_ok uses resultRef — must be present in state before route transitions to it
-          { ref: '$.context.data.results.success', value: { status: 'COMPLETE', outcome: 'ACCEPTED' }, itemId: 'build_result' },
+          { ref: '$.data.results.success', value: { status: 'COMPLETE', outcome: 'ACCEPTED' }, itemId: 'build_result' },
         ]
       : [];
     return { flow, state: reduce(dataStep as any, state, { writes }) };
@@ -380,7 +558,7 @@ describe('CONTROL/ROUTE', () => {
   it('throws FLOW_ROUTE_REF_NOT_RESOLVED on missing ref — not silently using default', () => {
     // ref points to decisions.validation.outcome, but we wrote nothing to decisions
     const { flow, state } = stateAtRoute(undefined);
-    // ref $.context.data.decisions.validation.outcome will not be found
+    // ref $.data.decisions.validation.outcome will not be found
     expect(() => plan(flow, state)).toThrow();
     try {
       plan(flow, state);
@@ -393,7 +571,7 @@ describe('CONTROL/ROUTE', () => {
     const { flow, state } = stateAtRoute('CONTINUE');
     const routeStep = plan(flow, state);
     const afterRoute = reduce(routeStep as any, state, null);
-    expect(afterRoute.currentStepId).toBe('finish_ok');
+    expect(afterRoute.current.stepId).toBe('finish_ok');
   });
 });
 
@@ -406,8 +584,8 @@ describe('TERMINAL', () => {
     const dataStep = plan(flow, state);
     state = reduce(dataStep as any, state, {
       writes: [
-        { ref: '$.context.data.decisions.validation', value: { outcome }, itemId: 'decide' },
-        { ref: '$.context.data.results.success', value: { status: 'COMPLETE', outcome: 'ACCEPTED' }, itemId: 'build_result' },
+        { ref: '$.data.decisions.validation', value: { outcome }, itemId: 'decide' },
+        { ref: '$.data.results.success', value: { status: 'COMPLETE', outcome: 'ACCEPTED' }, itemId: 'build_result' },
       ],
     });
     const routeStep = plan(flow, state);
@@ -415,7 +593,7 @@ describe('TERMINAL', () => {
     return { flow, state };
   }
 
-  it('TERMINAL/COMPLETE via resultRef reads from context.data.results.*', () => {
+  it('TERMINAL/COMPLETE via resultRef reads from $.data.results.*', () => {
     const { state } = runToTerminal('CONTINUE');
     // followTransition transitions to COMPLETE immediately
     expect(state.status).toBe('COMPLETE');
@@ -431,7 +609,7 @@ describe('TERMINAL', () => {
   it('reduce(TERMINAL) on already-finalized state returns state as-is (idempotent)', () => {
     const { state } = runToTerminal('CONTINUE');
     // State is COMPLETE — reduce(TERMINAL) is idempotent on finalized state
-    const termStep = { id: state.currentStepId, type: 'TERMINAL', subtype: state.currentStepSubtype };
+    const termStep = { id: state.current.stepId, type: 'TERMINAL', subtype: state.current.subtype };
     const result = reduce(termStep as any, state, null);
     expect(result.status).toBe('COMPLETE');
   });
@@ -527,9 +705,9 @@ describe('apply/resume public API boundary', () => {
     entryStepId: 'call_abs',
     steps: {
       call_abs: {
-        id: 'call_abs', type: 'EFFECT', subtype: 'CALL',
+        id: 'call_abs', type: 'EFFECT', subtype: 'COMMAND',
         title: 'Call ABS', description: 'Calls ABS.',
-        operationId: 'abs.call', inputRef: '$.context.input.payload',
+        operationId: 'abs.call', inputRef: '$.input.payload',
         nextStepId: 'wait_abs', onErrorStepId: 'finish_fail',
       },
       wait_abs: {
@@ -575,6 +753,177 @@ describe('apply/resume public API boundary', () => {
     catch (e: any) { expect(e.code).toBe('FLOW_RUNTIME_INPUT_INVALID'); }
   });
 
+  it('COMMAND → WAIT → resume success stores command result and completes WAIT execution', () => {
+    const flow = prepareFlow(effectFlowDef);
+    let state = createProcessState({ flow, processId: 'command-success', input: { payload: {} }, trace: 'off' });
+
+    state = apply(flow, state, 'call_abs', { requestId: 'req-1', result: { accepted: true } });
+    expect(state.status).toBe('WAITING');
+    expect(state.steps.call_abs.title).toBe('Call ABS');
+    expect(state.steps.call_abs.description).toBe('Calls ABS.');
+    expect(state.steps.wait_abs.title).toBe('Wait ABS');
+    expect(state.steps.wait_abs.description).toBe('Waits ABS.');
+    expect(state.steps.call_abs.executions[0].command?.status).toBe('WAITING');
+    expect(state.steps.wait_abs.executions[0].wait?.requestId).toBe('req-1');
+
+    state = resume(flow, state, 'wait_abs', { requestId: 'req-1', result: { status: 'SUCCESS', payload: { ok: true } } });
+    expect(state.status).toBe('COMPLETE');
+    expect(state.steps.finish_ok.title).toBe('OK');
+    expect(state.steps.finish_ok.description).toBe('Done.');
+    expect(state.steps.call_abs.executions[0].command?.status).toBe('COMPLETED');
+    expect(state.steps.call_abs.executions[0].command?.result).toEqual({ status: 'SUCCESS', payload: { ok: true } });
+    expect(state.steps.wait_abs.executions[0].wait?.outcome).toBe('SUCCESS');
+    expect(state.timeline).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: 'call_abs', kind: 'STEP_WAITING', status: 'WAITING' }),
+      expect.objectContaining({ stepId: 'call_abs', kind: 'STEP_COMPLETED', status: 'COMPLETED' }),
+      expect.objectContaining({ stepId: 'wait_abs', kind: 'STEP_RESUMED', status: 'COMPLETED' }),
+    ]));
+  });
+
+  it('resume rejects requestId mismatch for COMMAND', () => {
+    const flow = prepareFlow(effectFlowDef);
+    let state = createProcessState({ flow, processId: 'command-mismatch', input: { payload: {} } });
+    state = apply(flow, state, 'call_abs', { requestId: 'req-1', result: { accepted: true } });
+
+    try {
+      resume(flow, state, 'wait_abs', { requestId: 'req-2', result: { status: 'SUCCESS' } });
+      throw new Error('expected error');
+    } catch (e: any) {
+      expect(e.code).toBe('FLOW_RESUME_REQUEST_ID_MISMATCH');
+    }
+  });
+
+  it('resume timeout routes to onTimeoutStepId', () => {
+    const flow = prepareFlow(effectFlowDef);
+    let state = createProcessState({ flow, processId: 'command-timeout', input: { payload: {} } });
+    state = apply(flow, state, 'call_abs', { requestId: 'req-timeout', result: { accepted: true } });
+    state = resume(flow, state, 'wait_abs', { requestId: 'req-timeout', error: { type: 'TIMEOUT' }, errorCode: 'TIMEOUT' });
+    expect(state.status).toBe('FAIL');
+    expect(state.current.stepId).toBe('finish_fail');
+    expect(state.steps.wait_abs.executions[0].wait?.outcome).toBe('TIMEOUT');
+    expect(state.timeline).toEqual(expect.arrayContaining([
+      expect.objectContaining({ stepId: 'call_abs', kind: 'STEP_FAILED', status: 'FAILED' }),
+      expect.objectContaining({ stepId: 'wait_abs', kind: 'STEP_RESUMED', status: 'FAILED' }),
+    ]));
+  });
+
+  it('resume timeout without error payload routes to onTimeoutStepId', () => {
+    const flow = prepareFlow(effectFlowDef);
+    let state = createProcessState({ flow, processId: 'command-timeout-code-only', input: { payload: {} } });
+    state = apply(flow, state, 'call_abs', { requestId: 'req-timeout-code-only', result: { accepted: true } });
+    state = resume(flow, state, 'wait_abs', { requestId: 'req-timeout-code-only', errorCode: 'TIMEOUT' });
+    expect(state.status).toBe('FAIL');
+    expect(state.current.stepId).toBe('finish_fail');
+    expect(state.steps.call_abs.executions[0].status).toBe('FAILED');
+    expect(state.steps.call_abs.executions[0].failureCode).toBe('TIMEOUT');
+    expect(state.steps.wait_abs.executions[0].status).toBe('FAILED');
+    expect(state.steps.wait_abs.executions[0].wait?.outcome).toBe('TIMEOUT');
+  });
+
+  it('resume error routes to onErrorStepId', () => {
+    const flow = prepareFlow(effectFlowDef);
+    let state = createProcessState({ flow, processId: 'command-error', input: { payload: {} } });
+    state = apply(flow, state, 'call_abs', { requestId: 'req-error', result: { accepted: true } });
+    state = resume(flow, state, 'wait_abs', { requestId: 'req-error', error: { type: 'ERROR' }, errorCode: 'ERROR' });
+    expect(state.status).toBe('FAIL');
+    expect(state.current.stepId).toBe('finish_fail');
+    expect(state.steps.wait_abs.executions[0].wait?.outcome).toBe('ERROR');
+  });
+
+  it('SUBFLOW → WAIT → resume success stores subflow result and checks requestId correlation', () => {
+    const subflowDef = {
+      ...effectFlowDef,
+      id: 'flow.effect.subflow',
+      steps: {
+        ...effectFlowDef.steps,
+        call_abs: {
+          ...effectFlowDef.steps.call_abs,
+          subtype: 'SUBFLOW',
+          flowId: 'child.flow',
+          flowVersion: '1.0.0',
+          operationId: 'child.run',
+        },
+      },
+    } as const;
+    const flow = prepareFlow(subflowDef);
+    let state = createProcessState({ flow, processId: 'subflow-success', input: { payload: {} } });
+    state = apply(flow, state, 'call_abs', { requestId: 'child-1', result: { childProcessId: 'child-1' } });
+    state = resume(flow, state, 'wait_abs', { requestId: 'child-1', result: { status: 'COMPLETE', outcome: 'DONE' } });
+
+    expect(state.status).toBe('COMPLETE');
+    expect(state.steps.call_abs.executions[0].subflow?.status).toBe('COMPLETED');
+    expect(state.steps.call_abs.executions[0].subflow?.result).toEqual({ status: 'COMPLETE', outcome: 'DONE' });
+  });
+
+  it('resume rejects requestId mismatch for SUBFLOW completion', () => {
+    const subflowDef = {
+      ...effectFlowDef,
+      id: 'flow.effect.subflow.mismatch',
+      steps: {
+        ...effectFlowDef.steps,
+        call_abs: {
+          ...effectFlowDef.steps.call_abs,
+          subtype: 'SUBFLOW',
+          flowId: 'child.flow',
+          flowVersion: '1.0.0',
+          operationId: 'child.run',
+        },
+      },
+    } as const;
+    const flow = prepareFlow(subflowDef);
+    let state = createProcessState({ flow, processId: 'subflow-mismatch', input: { payload: {} } });
+    state = apply(flow, state, 'call_abs', { requestId: 'child-1', result: { childProcessId: 'child-1' } });
+
+    try {
+      resume(flow, state, 'wait_abs', { requestId: 'child-2', result: { status: 'COMPLETE', outcome: 'DONE' } });
+      throw new Error('expected error');
+    } catch (e: any) {
+      expect(e.code).toBe('FLOW_RESUME_REQUEST_ID_MISMATCH');
+    }
+  });
+
+  it('rejects legacy State v1 context/history/effects/waitResult shape at runtime boundary', () => {
+    const flow = prepareFlow(effectFlowDef);
+    const state = createProcessState({ flow, processId: 'legacy-state', input: { payload: {} } });
+    const legacy = {
+      ...state,
+      context: { input: {}, effects: { call_abs: { waitResult: {} } } },
+      history: [],
+    };
+    try {
+      plan(flow, legacy as any);
+      throw new Error('expected error');
+    } catch (e: any) {
+      expect(['FLOW_CONTEXT_FORBIDDEN', 'FLOW_CONTEXT_EFFECTS_FORBIDDEN', 'FLOW_WAIT_RESULT_PERSISTED_FORBIDDEN', 'FLOW_STATE_V1_FORBIDDEN']).toContain(e.code);
+    }
+  });
+
+  it('allows domain fields named waitResult inside input and data zones', () => {
+    const flow = prepareFlow(effectFlowDef);
+    const state = createProcessState({
+      flow,
+      processId: 'domain-wait-result',
+      input: { application: { waitResult: 'merchant-field' }, payload: {} },
+    });
+    state.data.facts = { waitResult: 'domain-fact' };
+    expect(plan(flow, state).type).toBe('EFFECT');
+  });
+
+  it('rejects persisted runtime waitResult projections in step executions', () => {
+    const flow = prepareFlow(effectFlowDef);
+    let state = createProcessState({ flow, processId: 'runtime-wait-result', input: { payload: {} } });
+    state = apply(flow, state, 'call_abs', { requestId: 'req-runtime-wait-result', result: { accepted: true } });
+    const corrupted = structuredClone(state) as any;
+    corrupted.steps.call_abs.executions[0].command.waitResult = { legacy: true };
+
+    try {
+      resume(flow, corrupted, 'wait_abs', { requestId: 'req-runtime-wait-result', result: { ok: true } });
+      throw new Error('expected error');
+    } catch (e: any) {
+      expect(e.code).toBe('FLOW_WAIT_RESULT_PERSISTED_FORBIDDEN');
+    }
+  });
+
   it('all examples validate as Flow5', async () => {
     const { readFileSync, readdirSync } = await import('node:fs');
     const { join } = await import('node:path');
@@ -608,7 +957,7 @@ describe('end-to-end: DATA → ROUTE → TERMINAL', () => {
     let state = createProcessState({ flow, processId: 'e2e-001', input: { clientId: 'APP-001' } });
 
     expect(state.status).toBe('ACTIVE');
-    expect(state.currentStepId).toBe('evaluate');
+    expect(state.current.stepId).toBe('evaluate');
 
     const dataStep = plan(flow, state);
     expect(dataStep.type).toBe('PROCESS');
@@ -616,18 +965,24 @@ describe('end-to-end: DATA → ROUTE → TERMINAL', () => {
 
     state = reduce(dataStep as any, state, {
       writes: [
-        { ref: '$.context.data.facts.validation', value: { errorCount: 0 }, itemId: 'facts' },
-        { ref: '$.context.data.decisions.validation', value: { outcome: 'CONTINUE', decisionSetId: 'x' }, itemId: 'decide' },
-        { ref: '$.context.data.results.success', value: { status: 'COMPLETE', outcome: 'ACCEPTED' }, itemId: 'result' },
+        { ref: '$.data.facts.validation', value: { errorCount: 0 }, itemId: 'facts' },
+        { ref: '$.data.decisions.validation', value: { outcome: 'CONTINUE', decisionSetId: 'x' }, itemId: 'decide' },
+        { ref: '$.data.results.success', value: { status: 'COMPLETE', outcome: 'ACCEPTED' }, itemId: 'result' },
       ],
     });
-    expect(state.currentStepId).toBe('route');
+    expect(state.current.stepId).toBe('route');
+    expect(state.steps.evaluate.title).toBe('Оценить данные');
+    expect(state.steps.evaluate.description).toBe('Запускает dataflow для принятия решения.');
 
     const routeStep = plan(flow, state);
     expect((routeStep as any).selectedNextStepId).toBe('finish_ok');
     state = reduce(routeStep as any, state, null);
-    expect(state.currentStepId).toBe('finish_ok');
+    expect(state.current.stepId).toBe('finish_ok');
     expect(state.status).toBe('COMPLETE');
     expect(state.result?.outcome).toBe('ACCEPTED');
+    expect(state.steps.route.title).toBe('Маршрутизировать');
+    expect(state.steps.route.description).toBe('Выбирает ветку по исходу dataflow.');
+    expect(state.steps.finish_ok.title).toBe('Завершить успешно');
+    expect(state.steps.finish_ok.description).toBe('Фиксирует успешный результат.');
   });
 });
